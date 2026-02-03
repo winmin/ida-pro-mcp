@@ -4,6 +4,7 @@ import functools
 import os
 import sys
 import time
+import threading
 import idaapi
 import idc
 from .rpc import McpToolError

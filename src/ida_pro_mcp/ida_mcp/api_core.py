@@ -2,7 +2,7 @@
 
 import re
 import time
-from typing import Annotated
+from typing import Annotated, Optional
 
 import idaapi
 import idautils
@@ -38,6 +38,7 @@ def init_caches():
 
 
 from .utils import (
+    Metadata,
     Function,
     ConvertedNumber,
     Global,
@@ -45,11 +46,23 @@ from .utils import (
     Page,
     NumberConversion,
     ListQuery,
+    String,
+    Segment,
     normalize_list_input,
     normalize_dict_list,
     get_function,
     paginate,
     pattern_filter,
+    get_image_size,
+)
+from .sync import IDAError
+from .tests import (
+    test,
+    assert_has_keys,
+    assert_valid_address,
+    assert_non_empty,
+    assert_is_list,
+    get_any_function,
 )
 
 

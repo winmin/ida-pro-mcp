@@ -129,54 +129,48 @@ Another thing to keep in mind is that LLMs will not perform well on obfuscated c
 
 You should also use a tool like Lumina or FLIRT to try and resolve all the open source library code and the C++ STL, this will further improve the accuracy.
 
-## SSE Transport & Headless MCP
+## Headless Mode (idalib)
 
-You can run an SSE server to connect to the user interface like this:
+For headless analysis without IDA GUI, you need to install [idalib](https://docs.hex-rays.com/user-guide/idalib) first.
 
+### idalib Installation
+
+1. Ensure you have IDA Pro 9.1+ with a valid license
+2. Set environment variables:
+   ```sh
+   export IDALIB_PATH=/path/to/ida/idalib
+   export IDAPRO_PATH=/path/to/ida
+   ```
+3. Install the Python bindings:
+   ```sh
+   pip install idapro
+   ```
+
+### Running Headless Server
+
+**Single binary mode:**
 ```sh
-uv run ida-pro-mcp --transport http://127.0.0.1:8744/sse
+# Analyze one binary (stdio transport)
+idalib-mcp path/to/binary
+
+# With SSE/HTTP transport
+idalib-mcp --host 127.0.0.1 --port 8745 path/to/binary
 ```
 
-After installing [`idalib`](https://docs.hex-rays.com/user-guide/idalib) you can also run a headless SSE server:
-
+**Session mode (recommended):**
 ```sh
-uv run idalib-mcp --host 127.0.0.1 --port 8745 path/to/executable
+# Start server without binary (LLM opens binaries dynamically)
+idalib-session-mcp
+
+# With SSE/HTTP transport
+idalib-session-mcp --transport http://127.0.0.1:8744/sse
 ```
 
-_Note_: The `idalib` feature was contributed by [Willi Ballenthin](https://github.com/williballenthin).
-
-## Session-based Headless Analysis
-
-The `idalib-session-mcp` command provides an advanced headless MCP server with session management capabilities.
-
-**Key Features:**
-
-- **Fully Headless**: Runs entirely without IDA GUI using idalib
-- **Multi-Binary Support**: Open and analyze multiple binaries simultaneously
-- **Dynamic Binary Loading**: LLM can open new binaries at runtime via MCP tools
-- **Session Management**: Switch between different analysis sessions on demand
-- **Analysis Time Tracking**: Reports how long IDA took to analyze each binary
-
-### Quick Start
-
-1. Generate the tools cache (run once after installation):
-
-```sh
-uv run idalib-session-mcp --generate-tools-cache /path/to/any/binary
-```
-
-2. Start the session-aware MCP server:
-
-```sh
-# stdio mode (for most MCP clients)
-uv run idalib-session-mcp
-
-# SSE mode
-uv run idalib-session-mcp --transport http://127.0.0.1:8744/sse
-```
+Session mode allows the LLM to open/switch between multiple binaries using `session_open`, `session_list`, `session_switch`, `session_close` tools.
 
 ### MCP Client Configuration
 
+**Claude Code (stdio mode):**
 ```json
 {
   "mcpServers": {
@@ -188,8 +182,19 @@ uv run idalib-session-mcp --transport http://127.0.0.1:8744/sse
 }
 ```
 
-Or if running from source:
+**Claude Code (SSE/HTTP mode):**
+```json
+{
+  "mcpServers": {
+    "idalib-session-mcp": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8744/sse"
+    }
+  }
+}
+```
 
+**From source:**
 ```json
 {
   "mcpServers": {
@@ -201,63 +206,12 @@ Or if running from source:
 }
 ```
 
-### Session Management Tools
+### Generate Tools Cache (Optional)
 
-| Tool | Description |
-|------|-------------|
-| `session_open(binary_path)` | Open a new binary for analysis. Returns session info including analysis time. |
-| `session_list()` | List all active analysis sessions with their status. |
-| `session_switch(session_id)` | Switch to a different session. All subsequent IDA tools will use this session. |
-| `session_close(session_id)` | Close a session and free resources. |
-| `session_info(session_id)` | Get detailed information about a session. |
-
-### Example Workflow
-
-```
-LLM: session_open("/path/to/malware.exe")
--> {"session_id": "abc123", "status": "ready", "analysis_time": 15.3, ...}
-
-LLM: decompile("main")
--> {decompiled code from malware.exe}
-
-LLM: session_open("/path/to/dropper.dll")
--> {"session_id": "def456", "status": "ready", "analysis_time": 8.7, ...}
-
-LLM: session_list()
--> [{"session_id": "abc123", "is_active": false, ...}, {"session_id": "def456", "is_active": true, ...}]
-
-LLM: session_switch("abc123")
--> switched back to malware.exe
-
-LLM: xrefs_to("0x401000")
--> {xrefs from malware.exe}
-```
-
-### Testing SSE Transport
-
-You can test the SSE and Streamable HTTP transports using the built-in test script:
-
+For faster startup, generate tools cache once:
 ```sh
-# Test with a manually started server
-uv run idalib-session-mcp --transport http://127.0.0.1:8744/sse &
-uv run python -m ida_pro_mcp.test_sse_transport --host 127.0.0.1 --port 8744
-
-# Or let the test script start the server automatically
-uv run python -m ida_pro_mcp.test_sse_transport --start-server
-
-# Test with a binary for full session functionality
-uv run python -m ida_pro_mcp.test_sse_transport --start-server /path/to/binary
+idalib-session-mcp --generate-tools-cache /path/to/any/binary
 ```
-
-### Comparison with idalib-mcp
-
-| Feature | idalib-mcp | idalib-session-mcp |
-|---------|------------|-------------------|
-| Headless | Yes | Yes |
-| Multiple binaries | No (single binary per process) | Yes (unlimited sessions) |
-| Dynamic binary loading | No (specified at startup) | Yes (via session_open tool) |
-| Session switching | N/A | Yes |
-| Analysis time reporting | No | Yes |
 
 
 ## MCP Resources

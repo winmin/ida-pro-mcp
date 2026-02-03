@@ -39,24 +39,17 @@ The binaries and prompt for the video are available in the [mcp-reversing-datase
 
 ## Installation
 
-Install the latest version of the IDA Pro MCP package:
-
 ```sh
-pip uninstall ida-pro-mcp
-pip install https://github.com/mrexodia/ida-pro-mcp/archive/refs/heads/main.zip
-```
+# Install from this fork
+pip install https://github.com/WinMin/ida-pro-mcp/archive/refs/heads/main.zip
 
-Configure the MCP servers and install the IDA Plugin:
-
-```
+# Configure MCP clients and install IDA plugin
 ida-pro-mcp --install
 ```
 
-**Important**: Make sure you completely restart IDA and your MCP client for the installation to take effect. Some clients (like Claude) run in the background and need to be quit from the tray icon.
+Restart IDA and your MCP client after installation.
 
-https://github.com/user-attachments/assets/65ed3373-a187-4dd5-a807-425dca1d8ee9
-
-_Note_: You need to load a binary in IDA before the plugin menu will show up.
+_Note_: Load a binary in IDA before the plugin menu shows up.
 
 ## Prompt Engineering
 

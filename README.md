@@ -1,6 +1,6 @@
 # IDA Pro MCP
 
-Simple [MCP Server](https://modelcontextprotocol.io/introduction) to allow vibe reversing in IDA Pro.
+AI-powered reverse engineering assistant that bridges IDA Pro with language models through [MCP](https://modelcontextprotocol.io/introduction).
 
 https://github.com/user-attachments/assets/6ebeaa92-a9db-43fa-b756-eececce2aca0
 

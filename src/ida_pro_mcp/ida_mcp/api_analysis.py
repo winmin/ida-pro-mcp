@@ -1,7 +1,6 @@
 from itertools import islice
 import struct
 from typing import Annotated, Optional
-import ida_hexrays
 import ida_lines
 import ida_funcs
 import idaapi
@@ -10,7 +9,6 @@ import ida_typeinf
 import ida_nalt
 import ida_bytes
 import ida_ida
-import ida_entry
 import ida_idaapi
 import ida_xref
 import ida_ua
@@ -35,13 +33,11 @@ from .utils import (
     get_assembly_lines,
     get_all_xrefs,
     get_all_comments,
-    Function,
     Argument,
     DisassemblyFunction,
     Xref,
     BasicBlock,
     StructFieldQuery,
-    InsnPattern,
 )
 
 # ============================================================================
@@ -155,6 +151,7 @@ def _resolve_immediate_insn_start(
                 return start
     return None
 
+
 # ============================================================================
 # Code Analysis & Decompilation
 # ============================================================================
@@ -197,7 +194,6 @@ def disasm(
         max_instructions = 50000
     if offset < 0:
         offset = 0
-
 
     try:
         start = parse_address(addr)
@@ -307,11 +303,7 @@ def disasm(
             "asm": out,
             "instruction_count": len(lines),
             "total_instructions": total_count if include_total else None,
-            "cursor": (
-                {"next": offset + max_instructions}
-                if more
-                else {"done": True}
-            ),
+            "cursor": ({"next": offset + max_instructions} if more else {"done": True}),
         }
     except Exception as e:
         return {
@@ -519,11 +511,13 @@ def callees(
                     break
                 current_ea = next_ea
 
-            results.append({
-                "addr": fn_addr,
-                "callees": list(callees_dict.values()),
-                "more": more,
-            })
+            results.append(
+                {
+                    "addr": fn_addr,
+                    "callees": list(callees_dict.values()),
+                    "more": more,
+                }
+            )
         except Exception as e:
             results.append({"addr": fn_addr, "callees": None, "error": str(e)})
 
@@ -738,7 +732,7 @@ def find(
             try:
                 ea = ida_ida.inf_get_min_ea()
                 max_ea = ida_ida.inf_get_max_ea()
-                mask = b"\xFF" * len(pattern_bytes)
+                mask = b"\xff" * len(pattern_bytes)
                 flags = ida_bytes.BIN_SEARCH_FORWARD | ida_bytes.BIN_SEARCH_NOSHOW
                 while ea != idaapi.BADADDR:
                     ea = ida_bytes.bin_search(
@@ -809,7 +803,12 @@ def find(
                         ea = seg.start_ea
                         while ea != idaapi.BADADDR and ea < seg.end_ea:
                             ea = ida_bytes.bin_search(
-                                ea, seg.end_ea, pattern_bytes, b"\xFF" * size, size, ida_bytes.BIN_SEARCH_FORWARD
+                                ea,
+                                seg.end_ea,
+                                pattern_bytes,
+                                b"\xff" * size,
+                                size,
+                                ida_bytes.BIN_SEARCH_FORWARD,
                             )
                             if ea == idaapi.BADADDR:
                                 break
@@ -928,7 +927,9 @@ def find(
     return results
 
 
-def _resolve_insn_scan_ranges(pattern: dict, allow_broad: bool) -> tuple[list[tuple[int, int]], str | None]:
+def _resolve_insn_scan_ranges(
+    pattern: dict, allow_broad: bool
+) -> tuple[list[tuple[int, int]], str | None]:
     func_addr = pattern.get("func")
     segment_name = pattern.get("segment")
     start_s = pattern.get("start")
@@ -1154,8 +1155,12 @@ def callgraph(
         list[str] | str, "Root function addresses to start call graph traversal from"
     ],
     max_depth: Annotated[int, "Maximum depth for call graph traversal"] = 5,
-    max_nodes: Annotated[int, "Max nodes across the graph (default: 1000, max: 100000)"] = 1000,
-    max_edges: Annotated[int, "Max edges across the graph (default: 5000, max: 200000)"] = 5000,
+    max_nodes: Annotated[
+        int, "Max nodes across the graph (default: 1000, max: 100000)"
+    ] = 1000,
+    max_edges: Annotated[
+        int, "Max edges across the graph (default: 5000, max: 200000)"
+    ] = 5000,
     max_edges_per_func: Annotated[
         int, "Max edges per function (default: 200, max: 5000)"
     ] = 200,

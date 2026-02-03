@@ -7,7 +7,13 @@ from typing import TypeVar, cast
 from http.server import HTTPServer
 
 from .sync import idasync
-from .rpc import McpRpcRegistry, McpHttpRequestHandler, MCP_SERVER, MCP_UNSAFE, get_cached_output
+from .rpc import (
+    McpRpcRegistry,
+    McpHttpRequestHandler,
+    MCP_SERVER,
+    MCP_UNSAFE,
+    get_cached_output,
+)
 
 
 T = TypeVar("T")
@@ -143,7 +149,9 @@ class IdaMcpHttpRequestHandler(McpHttpRequestHandler):
         content_type = "application/json" if extension == "json" else "text/plain"
         self.send_header("Content-Type", f"{content_type}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Content-Disposition", f'attachment; filename="{output_id}.{extension}"')
+        self.send_header(
+            "Content-Disposition", f'attachment; filename="{output_id}.{extension}"'
+        )
         self.end_headers()
         self.wfile.write(body)
 

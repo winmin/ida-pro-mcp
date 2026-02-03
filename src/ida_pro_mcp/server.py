@@ -186,6 +186,7 @@ def install_mcp_servers(*, stdio: bool = False, uninstall=False, quiet=False):
     # None means use default "mcpServers" at top level
     special_json_structures = {
         "VS Code": ("mcp", "servers"),
+        "VS Code Insiders": ("mcp", "servers"),
         "Visual Studio 2022": (None, "servers"),  # servers at top level
     }
 
@@ -303,6 +304,14 @@ def install_mcp_servers(*, stdio: bool = False, uninstall=False, quiet=False):
                 os.path.join(
                     os.getenv("APPDATA", ""),
                     "Code",
+                    "User",
+                ),
+                "settings.json",
+            ),
+            "VS Code Insiders": (
+                os.path.join(
+                    os.getenv("APPDATA", ""),
+                    "Code - Insiders",
                     "User",
                 ),
                 "settings.json",
@@ -460,6 +469,16 @@ def install_mcp_servers(*, stdio: bool = False, uninstall=False, quiet=False):
                 ),
                 "settings.json",
             ),
+            "VS Code Insiders": (
+                os.path.join(
+                    os.path.expanduser("~"),
+                    "Library",
+                    "Application Support",
+                    "Code - Insiders",
+                    "User",
+                ),
+                "settings.json",
+            ),
         }
     elif sys.platform == "linux":
         configs = {
@@ -578,6 +597,15 @@ def install_mcp_servers(*, stdio: bool = False, uninstall=False, quiet=False):
                     os.path.expanduser("~"),
                     ".config",
                     "Code",
+                    "User",
+                ),
+                "settings.json",
+            ),
+            "VS Code Insiders": (
+                os.path.join(
+                    os.path.expanduser("~"),
+                    ".config",
+                    "Code - Insiders",
                     "User",
                 ),
                 "settings.json",

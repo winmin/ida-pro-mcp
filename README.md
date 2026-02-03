@@ -31,6 +31,7 @@ The binaries and prompt for the video are available in the [mcp-reversing-datase
   - [Roo Code](https://roocode.com)
   - [Trae](https://trae.ai/)
   - [VS Code](https://code.visualstudio.com/)
+  - [VS Code Insiders](https://code.visualstudio.com/insiders)
   - [Warp](https://www.warp.dev/)
   - [Windsurf](https://windsurf.com)
   - [Zed](https://zed.dev/)

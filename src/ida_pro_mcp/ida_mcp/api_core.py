@@ -2,14 +2,11 @@
 
 import re
 import time
-from typing import Annotated, Optional
+from typing import Annotated
 
-import ida_hexrays
 import idaapi
 import idautils
 import ida_nalt
-import ida_typeinf
-import ida_segment
 
 from .rpc import tool
 from .sync import idasync
@@ -37,36 +34,22 @@ def init_caches():
     t0 = time.perf_counter()
     strings = _get_strings_cache()
     t1 = time.perf_counter()
-    print(f"[MCP] Cached {len(strings)} strings in {(t1-t0)*1000:.0f}ms")
+    print(f"[MCP] Cached {len(strings)} strings in {(t1 - t0) * 1000:.0f}ms")
 
 
 from .utils import (
-    Metadata,
     Function,
     ConvertedNumber,
     Global,
     Import,
-    String,
-    Segment,
     Page,
     NumberConversion,
     ListQuery,
-    get_image_size,
-    parse_address,
     normalize_list_input,
     normalize_dict_list,
     get_function,
     paginate,
     pattern_filter,
-)
-from .sync import IDAError
-from .tests import (
-    test,
-    assert_has_keys,
-    assert_valid_address,
-    assert_non_empty,
-    assert_is_list,
-    get_any_function,
 )
 
 
@@ -614,164 +597,3 @@ def find_regex(
         "matches": matches,
         "cursor": {"next": offset + limit} if more else {"done": True},
     }
-
-
-@tool
-@idasync
-def strings(
-    queries: Annotated[
-        list[ListQuery] | ListQuery | str,
-        "List strings with optional filtering and pagination",
-    ],
-) -> list[Page[String]]:
-    """List strings"""
-    queries = normalize_dict_list(
-        queries, lambda s: {"offset": 0, "count": 50, "filter": s}
-    )
-    # Use cached strings instead of rebuilding every time
-    all_strings = [
-        String(addr=hex(ea), length=len(text), string=text)
-        for ea, text in _get_strings_cache()
-    ]
-
-    results = []
-    for query in queries:
-        offset = query.get("offset", 0)
-        count = query.get("count", 100)
-        filter_pattern = query.get("filter", "")
-
-        # Treat empty/"*" filter as "all"
-        if filter_pattern in ("", "*"):
-            filter_pattern = ""
-
-        filtered = pattern_filter(all_strings, filter_pattern, "string")
-        results.append(paginate(filtered, offset, count))
-
-    return results
-
-
-@test()
-def test_strings():
-    """strings returns string list with proper structure"""
-    result = strings({})
-    assert_is_list(result, min_length=1)
-    page = result[0]
-    assert_has_keys(page, "data", "next_offset")
-    # If there are strings, check structure
-    if page["data"]:
-        string_item = page["data"][0]
-        assert_has_keys(string_item, "addr", "length", "string")
-        assert_valid_address(string_item["addr"])
-
-
-def ida_segment_perm2str(perm: int) -> str:
-    perms = []
-    if perm & ida_segment.SEGPERM_READ:
-        perms.append("r")
-    else:
-        perms.append("-")
-    if perm & ida_segment.SEGPERM_WRITE:
-        perms.append("w")
-    else:
-        perms.append("-")
-    if perm & ida_segment.SEGPERM_EXEC:
-        perms.append("x")
-    else:
-        perms.append("-")
-    return "".join(perms)
-
-
-@tool
-@idasync
-def segments() -> list[Segment]:
-    """List all segments"""
-    segs = []
-    for i in range(ida_segment.get_segm_qty()):
-        seg = ida_segment.getnseg(i)
-        if not seg:
-            continue
-        seg_name = ida_segment.get_segm_name(seg)
-        segs.append(
-            Segment(
-                name=seg_name,
-                start=hex(seg.start_ea),
-                end=hex(seg.end_ea),
-                size=hex(seg.end_ea - seg.start_ea),
-                permissions=ida_segment_perm2str(seg.perm),
-            )
-        )
-    return segs
-
-
-@test()
-def test_segments():
-    """segments returns list of memory segments"""
-    result = segments()
-    assert_is_list(result, min_length=1)
-    seg = result[0]
-    assert_has_keys(seg, "name", "start", "end", "size", "permissions")
-    assert_valid_address(seg["start"])
-    assert_valid_address(seg["end"])
-
-
-@tool
-@idasync
-def local_types():
-    """List local types"""
-    error = ida_hexrays.hexrays_failure_t()
-    locals_list = []
-    idati = ida_typeinf.get_idati()
-    type_count = ida_typeinf.get_ordinal_limit(idati)
-    for ordinal in range(1, type_count):
-        try:
-            tif = ida_typeinf.tinfo_t()
-            if tif.get_numbered_type(idati, ordinal):
-                type_name = tif.get_type_name()
-                if not type_name:
-                    type_name = f"<Anonymous Type #{ordinal}>"
-                locals_list.append(f"\nType #{ordinal}: {type_name}")
-                if tif.is_udt():
-                    c_decl_flags = (
-                        ida_typeinf.PRTYPE_MULTI
-                        | ida_typeinf.PRTYPE_TYPE
-                        | ida_typeinf.PRTYPE_SEMI
-                        | ida_typeinf.PRTYPE_DEF
-                        | ida_typeinf.PRTYPE_METHODS
-                        | ida_typeinf.PRTYPE_OFFSETS
-                    )
-                    c_decl_output = tif._print(None, c_decl_flags)
-                    if c_decl_output:
-                        locals_list.append(f"  C declaration:\n{c_decl_output}")
-                else:
-                    simple_decl = tif._print(
-                        None,
-                        ida_typeinf.PRTYPE_1LINE
-                        | ida_typeinf.PRTYPE_TYPE
-                        | ida_typeinf.PRTYPE_SEMI,
-                    )
-                    if simple_decl:
-                        locals_list.append(f"  Simple declaration:\n{simple_decl}")
-            else:
-                message = f"\nType #{ordinal}: Failed to retrieve information."
-                if error.str:
-                    message += f": {error.str}"
-                if error.errea != idaapi.BADADDR:
-                    message += f"from (address: {hex(error.errea)})"
-                raise IDAError(message)
-        except Exception:
-            continue
-    return locals_list
-
-
-@test()
-def test_local_types():
-    """local_types returns list of local types"""
-    result = local_types()
-    # Result is a list of strings describing local types
-    assert isinstance(result, list), f"Expected list, got {type(result).__name__}"
-    # Local types may be empty for some binaries
-    if result:
-        # Each item should be a string describing a type
-        assert isinstance(result[0], str), (
-            f"Expected string items, got {type(result[0]).__name__}"
-        )

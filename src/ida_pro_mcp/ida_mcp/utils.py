@@ -243,7 +243,7 @@ class Metadata(TypedDict):
     md5: str
     sha256: str
     crc32: str
-    filesize: str
+    filesize: int
 
 
 class Function(TypedDict):

@@ -96,8 +96,7 @@ def _parse_func_query(query: str) -> int:
 @idasync
 def idb_meta() -> Metadata:
     """Get IDB metadata"""
-    info = idaapi.get_inf_structure()
-    base = info.min_ea
+    base = idaapi.inf_get_min_ea()
     image_size = get_image_size()
 
     return Metadata(

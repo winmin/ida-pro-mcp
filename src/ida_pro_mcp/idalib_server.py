@@ -291,6 +291,12 @@ def main():
         "--unsafe", action="store_true", help="Enable unsafe functions (DANGEROUS)"
     )
     parser.add_argument(
+        "--session-id",
+        type=str,
+        default=None,
+        help="Session ID for this idalib instance (used by session manager)",
+    )
+    parser.add_argument(
         "input_path",
         type=Path,
         nargs="?",  # Make input_path optional

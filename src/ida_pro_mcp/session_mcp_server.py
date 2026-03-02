@@ -19,6 +19,7 @@ Usage:
 
 import os
 import sys
+import ast
 import json
 import time
 import uuid
@@ -79,6 +80,174 @@ def save_cached_tools(tools: list[dict]) -> None:
         logger.warning(f"Failed to save tools cache: {e}")
 
 
+# ============================================================================
+# AST-based static tool schema extraction (no IDA required)
+# ============================================================================
+
+def _ast_type_to_json_schema(node: ast.expr) -> dict:
+    """Convert an AST type annotation node to JSON schema"""
+    if node is None:
+        return {"type": "object"}
+
+    # Simple name: str, int, bool, dict, list, etc.
+    if isinstance(node, ast.Name):
+        return {"type": {
+            "str": "string", "int": "integer", "float": "number",
+            "bool": "boolean", "dict": "object", "list": "array",
+        }.get(node.id, "object")}
+
+    # ast.Constant (e.g. None)
+    if isinstance(node, ast.Constant) and node.value is None:
+        return {"type": "null"}
+
+    # X | Y  (BinOp with BitOr)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left = _ast_type_to_json_schema(node.left)
+        right = _ast_type_to_json_schema(node.right)
+        # Flatten nested anyOf
+        variants = []
+        for s in (left, right):
+            if "anyOf" in s:
+                variants.extend(s["anyOf"])
+            else:
+                variants.append(s)
+        return {"anyOf": variants}
+
+    # Subscript: Annotated[T, "desc"], Optional[T], list[T], etc.
+    if isinstance(node, ast.Subscript):
+        base = node.value
+        base_name = base.id if isinstance(base, ast.Name) else ""
+
+        # Annotated[T, "description"]
+        if base_name == "Annotated":
+            if isinstance(node.slice, ast.Tuple):
+                elts = node.slice.elts
+                schema = _ast_type_to_json_schema(elts[0])
+                # Last element is the description string
+                if len(elts) >= 2 and isinstance(elts[-1], ast.Constant) and isinstance(elts[-1].value, str):
+                    schema["description"] = elts[-1].value
+                return schema
+            return _ast_type_to_json_schema(node.slice)
+
+        # Optional[T] -> anyOf[T, null]
+        if base_name == "Optional":
+            inner = node.slice
+            return {"anyOf": [_ast_type_to_json_schema(inner), {"type": "null"}]}
+
+        # list[T]
+        if base_name == "list":
+            inner = node.slice
+            return {"type": "array", "items": _ast_type_to_json_schema(inner)}
+
+        # dict[K, V]
+        if base_name == "dict":
+            if isinstance(node.slice, ast.Tuple) and len(node.slice.elts) == 2:
+                return {"type": "object", "additionalProperties": _ast_type_to_json_schema(node.slice.elts[1])}
+            return {"type": "object"}
+
+    # Tuple (used in Union-style subscripts)
+    if isinstance(node, ast.Tuple):
+        return {"anyOf": [_ast_type_to_json_schema(e) for e in node.elts]}
+
+    # Fallback
+    return {"type": "object"}
+
+
+def _has_decorator(decorators: list[ast.expr], name: str) -> bool:
+    """Check if a function has a specific decorator"""
+    for d in decorators:
+        if isinstance(d, ast.Name) and d.id == name:
+            return True
+        if isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == name:
+            return True
+    return False
+
+
+def _extract_tools_from_file(filepath: str) -> list[dict]:
+    """Extract @tool decorated function schemas from a Python source file using AST"""
+    with open(filepath, "r", encoding="utf-8") as f:
+        source = f.read()
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        logger.warning(f"Failed to parse {filepath}")
+        return []
+
+    tools = []
+    for node in ast.iter_child_nodes(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if not _has_decorator(node.decorator_list, "tool"):
+            continue
+        # Skip test functions and private functions
+        if node.name.startswith("_") or node.name.startswith("test"):
+            continue
+
+        # Extract docstring
+        docstring = ast.get_docstring(node) or f"Call {node.name}"
+
+        # Extract parameters
+        properties = {}
+        required = []
+        args = node.args
+
+        # Build defaults mapping: last N args have defaults
+        num_defaults = len(args.defaults)
+        num_args = len(args.args)
+        defaults_start = num_args - num_defaults
+
+        for i, arg in enumerate(args.args):
+            if arg.arg in ("self", "cls"):
+                continue
+            if arg.annotation:
+                schema = _ast_type_to_json_schema(arg.annotation)
+                properties[arg.arg] = schema
+            else:
+                properties[arg.arg] = {"type": "object"}
+
+            # Check if parameter has a default value
+            if i < defaults_start:
+                required.append(arg.arg)
+
+        tool_schema = {
+            "name": node.name,
+            "description": docstring.strip(),
+            "inputSchema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        }
+        tools.append(tool_schema)
+
+    return tools
+
+
+def extract_ida_tools_from_source() -> list[dict]:
+    """Extract all IDA tool schemas from api_*.py source files using AST.
+
+    This allows the session MCP server to know about all IDA tools at startup
+    without needing a running IDA/idalib instance.
+    """
+    ida_mcp_dir = os.path.join(os.path.dirname(__file__), "ida_mcp")
+    if not os.path.isdir(ida_mcp_dir):
+        logger.warning(f"ida_mcp directory not found: {ida_mcp_dir}")
+        return []
+
+    all_tools = []
+    for filename in sorted(os.listdir(ida_mcp_dir)):
+        if not filename.startswith("api_") or not filename.endswith(".py"):
+            continue
+        filepath = os.path.join(ida_mcp_dir, filename)
+        tools = _extract_tools_from_file(filepath)
+        logger.debug(f"Extracted {len(tools)} tools from {filename}")
+        all_tools.extend(tools)
+
+    logger.info(f"Extracted {len(all_tools)} IDA tools from source via AST")
+    return all_tools
+
+
 @dataclass
 class Session:
     """Represents an active IDA session"""
@@ -109,8 +278,12 @@ class SessionMcpServer:
         self._lock = threading.Lock()
         self._port_counter = SESSION_PORT_START
 
-        # Load cached IDA tools from file (for startup without session)
+        # Load IDA tools: try cache first, fall back to AST extraction from source
         self._cached_ida_tools: Optional[list[dict]] = load_cached_tools()
+        if self._cached_ida_tools is None:
+            ast_tools = extract_ida_tools_from_source()
+            if ast_tools:
+                self._cached_ida_tools = ast_tools
 
         # Register session management tools
         self._register_session_tools()
@@ -278,8 +451,13 @@ class SessionMcpServer:
                     if tool_name.startswith("session_"):
                         return original_dispatch(request)
 
-                    # Route to active session
-                    return self._route_to_session(request_obj)
+                    # Extract session_id from arguments (if provided by agent)
+                    # and strip it before forwarding to the IDA session
+                    arguments = request_obj.get("params", {}).get("arguments", {})
+                    target_session_id = arguments.pop("session_id", None)
+
+                    # Route to specified session or fall back to active session
+                    return self._route_to_session(request_obj, session_id=target_session_id)
 
                 # For tools/list, merge session tools with IDA tools
                 if method == "tools/list":
@@ -296,22 +474,34 @@ class SessionMcpServer:
 
         self.mcp.registry.dispatch = patched_dispatch
 
-    def _route_to_session(self, request: JsonRpcRequest) -> JsonRpcResponse | None:
-        """Route a request to the active IDA session"""
+    def _route_to_session(self, request: JsonRpcRequest, session_id: str | None = None) -> JsonRpcResponse | None:
+        """Route a request to a specific or active IDA session.
+
+        Args:
+            request: The JSON-RPC request to forward.
+            session_id: Target session ID. If None, falls back to active_session_id.
+        """
         with self._lock:
-            if self.active_session_id is None:
+            target_id = session_id or self.active_session_id
+            if target_id is None:
                 return self._error_response(
                     request.get("id"),
                     -32001,
-                    "No active session. Use session_open to create one.",
+                    "No active session. Use session_open to create one, or pass session_id.",
                 )
 
-            session = self.sessions.get(self.active_session_id)
-            if session is None or session.status != "ready":
+            session = self.sessions.get(target_id)
+            if session is None:
                 return self._error_response(
                     request.get("id"),
                     -32001,
-                    "Active session is not ready.",
+                    f"Session {target_id} not found.",
+                )
+            if session.status != "ready":
+                return self._error_response(
+                    request.get("id"),
+                    -32001,
+                    f"Session {target_id} is not ready (status: {session.status}).",
                 )
 
             port = session.port
@@ -334,6 +524,36 @@ class SessionMcpServer:
         finally:
             conn.close()
 
+    # Tools from idalib_server.py that conflict with session management tools
+    _EXCLUDED_TOOLS = {"idalib_open", "idalib_close", "idalib_switch", "idalib_list", "idalib_current"}
+
+    def _filter_session_tools(self, tools: list[dict]) -> list[dict]:
+        """Filter out idalib session tools that conflict with our session_* tools"""
+        return [t for t in tools if t.get("name") not in self._EXCLUDED_TOOLS]
+
+    @staticmethod
+    def _inject_session_id_param(tools: list[dict]) -> list[dict]:
+        """Inject optional session_id parameter into each IDA tool schema.
+
+        This allows multi-agent scenarios where each agent explicitly specifies
+        which session to route the tool call to, avoiding global active_session_id conflicts.
+        """
+        session_id_schema = {
+            "type": "string",
+            "description": "Session ID to route this call to. If omitted, uses the active session.",
+        }
+        result = []
+        for tool in tools:
+            tool = dict(tool)  # shallow copy
+            input_schema = dict(tool.get("inputSchema", {}))
+            props = dict(input_schema.get("properties", {}))
+            props["session_id"] = session_id_schema
+            input_schema["properties"] = props
+            # session_id is optional, so do NOT add to required
+            tool["inputSchema"] = input_schema
+            result.append(tool)
+        return result
+
     def _merge_tools_list(self, local_response: JsonRpcResponse) -> JsonRpcResponse:
         """Merge local session tools with IDA tools from active session"""
         if local_response is None:
@@ -344,10 +564,10 @@ class SessionMcpServer:
 
         # If we have cached IDA tools, use them
         if self._cached_ida_tools is not None:
-            all_tools = local_tools + self._cached_ida_tools
+            ida_tools = self._inject_session_id_param(self._filter_session_tools(self._cached_ida_tools))
             return {
                 "jsonrpc": "2.0",
-                "result": {"tools": all_tools},
+                "result": {"tools": local_tools + ida_tools},
                 "id": local_response.get("id"),
             }
 
@@ -372,13 +592,16 @@ class SessionMcpServer:
             data = json.loads(response.read().decode())
             session_tools = data.get("result", {}).get("tools", [])
 
+            # Filter out idalib session tools that conflict with our session_* tools
+            session_tools = self._filter_session_tools(session_tools)
+
             # Cache the IDA tools for future use (both in memory and to file)
             self._cached_ida_tools = session_tools
             save_cached_tools(session_tools)
             logger.info(f"Cached {len(session_tools)} IDA tools")
 
-            # Merge tools (local first, then session)
-            all_tools = local_tools + session_tools
+            # Merge tools (local first, then session with injected session_id param)
+            all_tools = local_tools + self._inject_session_id_param(session_tools)
             return {
                 "jsonrpc": "2.0",
                 "result": {"tools": all_tools},

@@ -906,10 +906,13 @@ def main():
     server = SessionMcpServer(unsafe=args.unsafe, verbose=args.verbose)
 
     def signal_handler(signum, frame):
-        logger.info("Shutting down, saving all IDBs...")
-        server.cleanup()
-        server.stop()
-        sys.exit(0)
+        logger.info("Shutting down...")
+        # Stop the HTTP server from a background thread to avoid deadlock
+        # (shutdown() waits for serve_forever() to finish, but serve_forever()
+        # is running on this same main thread)
+        def _stop():
+            server.stop()
+        threading.Thread(target=_stop, daemon=True).start()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

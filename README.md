@@ -1,5 +1,7 @@
 # idalib-session-mcp
 
+[中文版](README_zh.md) | English
+
 A session-aware, multi-agent MCP server for headless IDA Pro reverse engineering. Built on top of [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) by [@mrexodia](https://github.com/mrexodia).
 
 ## What is this?

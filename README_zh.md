@@ -1,5 +1,7 @@
 # idalib-session-mcp
 
+中文 | [English](README.md)
+
 基于 [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) 的多会话、多 Agent 无头 IDA Pro MCP 服务器。
 
 ## 简介

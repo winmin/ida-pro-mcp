@@ -1,3 +1,4 @@
+import os
 import sys
 import signal
 import logging
@@ -291,6 +292,12 @@ def main():
         "--unsafe", action="store_true", help="Enable unsafe functions (DANGEROUS)"
     )
     parser.add_argument(
+        "--auth-token",
+        type=str,
+        default=os.environ.get("IDA_MCP_AUTH_TOKEN"),
+        help="Bearer token for HTTP authentication (or set IDA_MCP_AUTH_TOKEN env var)",
+    )
+    parser.add_argument(
         "--session-id",
         type=str,
         default=None,
@@ -351,6 +358,7 @@ def main():
     # Start HTTP server on main thread with threaded=False
     # This ensures IDA operations run on the main thread, avoiding execute_sync issues
     # Note: SSE won't work properly in this mode, but Streamable HTTP works fine
+    MCP_SERVER.auth_token = args.auth_token
     MCP_SERVER.serve(host=args.host, port=args.port, background=False, threaded=False)
 
 

@@ -99,7 +99,7 @@ class McpHttpRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", origin)
         if preflight:
             self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept, X-Requested-With, Mcp-Session-Id, Mcp-Protocol-Version")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept, X-Requested-With, Mcp-Session-Id, Mcp-Protocol-Version, Authorization")
             if self.headers.get("Access-Control-Request-Private-Network") == "true":
                 self.send_header("Access-Control-Allow-Private-Network", "true")
 
@@ -118,7 +118,20 @@ class McpHttpRequestHandler(BaseHTTPRequestHandler):
             # Client disconnected - normal, suppress traceback
             pass
 
+    def _check_auth(self) -> bool:
+        """Validate Bearer token from Authorization header."""
+        token = self.mcp_server.auth_token
+        if token is None:
+            return True  # No token configured, skip auth
+        auth = self.headers.get("Authorization", "")
+        if auth != f"Bearer {token}":
+            self.send_error(401, "Unauthorized")
+            return False
+        return True
+
     def do_GET(self):
+        if not self._check_auth():
+            return
         match urlparse(self.path).path:
             case "/sse":
                 self._handle_sse_get()
@@ -128,6 +141,8 @@ class McpHttpRequestHandler(BaseHTTPRequestHandler):
                 self.send_error(404, "Not Found")
 
     def do_POST(self):
+        if not self._check_auth():
+            return
         # Read request body
         content_length = int(self.headers.get("Content-Length", 0))
 
@@ -245,6 +260,7 @@ class McpServer:
         self.name = name
         self.version = version
         self.cors_allowed_origins: Callable[[str], bool] | list[str] | str | None = self.cors_localhost
+        self.auth_token: str | None = None
         self.post_body_limit = 10 * 1024 * 1024  # 10MB
         self.tools = McpRpcRegistry()
         self.resources = McpRpcRegistry()

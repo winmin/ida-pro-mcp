@@ -876,6 +876,12 @@ def main():
     parser.add_argument(
         "--config", action="store_true", help="Generate MCP config JSON"
     )
+    parser.add_argument(
+        "--auth-token",
+        type=str,
+        default=os.environ.get("IDA_MCP_AUTH_TOKEN"),
+        help="Bearer token for HTTP authentication (or set IDA_MCP_AUTH_TOKEN env var)",
+    )
     args = parser.parse_args()
 
     # Parse IDA RPC server argument
@@ -911,6 +917,7 @@ def main():
             if url.hostname is None or url.port is None:
                 raise Exception(f"Invalid transport URL: {args.transport}")
             # NOTE: npx -y @modelcontextprotocol/inspector for debugging
+            mcp.auth_token = args.auth_token
             mcp.serve(url.hostname, url.port)
             input("Server is running, press Enter or Ctrl+C to stop.")
     except (KeyboardInterrupt, EOFError):

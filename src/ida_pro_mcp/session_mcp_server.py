@@ -881,6 +881,12 @@ def main():
         "--unsafe", action="store_true", help="Enable unsafe functions (DANGEROUS)"
     )
     parser.add_argument(
+        "--auth-token",
+        type=str,
+        default=os.environ.get("IDA_MCP_AUTH_TOKEN"),
+        help="Bearer token for HTTP authentication (or set IDA_MCP_AUTH_TOKEN env var)",
+    )
+    parser.add_argument(
         "--generate-tools-cache",
         type=str,
         metavar="BINARY",
@@ -904,6 +910,7 @@ def main():
         return
 
     server = SessionMcpServer(unsafe=args.unsafe, verbose=args.verbose)
+    server.mcp.auth_token = args.auth_token
 
     def signal_handler(signum, frame):
         logger.info("Shutting down...")

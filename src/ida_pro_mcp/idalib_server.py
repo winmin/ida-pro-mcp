@@ -350,9 +350,15 @@ def main():
     MCP_SERVER.auth_token = args.auth_token
 
     # NOTE: npx -y @modelcontextprotocol/inspector for debugging
-    # TODO: with background=True the main thread does not fake any
-    # work from @idasync, so we deadlock.
-    MCP_SERVER.serve(host=args.host, port=args.port, background=False)
+    # Headless idalib tools use @idasync heavily. Requests must therefore run on
+    # the main thread; otherwise ThreadingHTTPServer dispatches them from worker
+    # threads and execute_sync never makes progress, causing tool timeouts.
+    MCP_SERVER.serve(
+        host=args.host,
+        port=args.port,
+        background=False,
+        threaded=False,
+    )
 
 
 if __name__ == "__main__":

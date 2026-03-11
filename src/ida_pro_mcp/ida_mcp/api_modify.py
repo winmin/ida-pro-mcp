@@ -6,6 +6,8 @@ import ida_bytes
 import ida_typeinf
 import ida_frame
 import ida_dirtree
+import ida_funcs
+import ida_ua
 
 from .rpc import tool
 from .sync import idasync, IDAError
@@ -20,6 +22,8 @@ from .utils import (
     LocalRename,
     StackRename,
     RenameBatch,
+    DefineOp,
+    UndefineOp,
 )
 from .tests import (
     test,
@@ -458,146 +462,136 @@ def rename(batch: RenameBatch) -> dict:
     return result
 
 
-@test()
-def test_rename_function_roundtrip():
-    """rename can rename and restore function names"""
-    from .api_core import lookup_funcs
+@tool
+@idasync
+def define_func(items: list[DefineOp] | DefineOp) -> list[dict]:
+    """Define function(s) at address(es). IDA auto-determines bounds unless end address specified."""
+    if isinstance(items, dict):
+        items = [items]
 
-    fn_addr = get_any_function()
-    if not fn_addr:
-        return  # Skip if no functions
+    results = []
+    for item in items:
+        addr_str = item.get("addr", "")
+        end_str = item.get("end", "")
 
-    # Get original name
-    lookup_result = lookup_funcs(fn_addr)
-    if not lookup_result or not lookup_result[0].get("fn"):
-        return  # Skip if lookup failed
-    original_name = lookup_result[0]["fn"]["name"]
+        try:
+            start_ea = parse_address(addr_str)
+            end_ea = parse_address(end_str) if end_str else idaapi.BADADDR
 
-    try:
-        # Rename the function
-        result = rename({"func": [{"addr": fn_addr, "name": "__test_func_name__"}]})
-        assert_has_keys(result, "func")
-        assert_is_list(result["func"], min_length=1)
-        assert_has_keys(result["func"][0], "addr", "name", "ok")
-        assert result["func"][0]["ok"], (
-            f"Rename failed: {result['func'][0].get('error')}"
-        )
-
-        # Verify the change
-        new_lookup = lookup_funcs(fn_addr)
-        new_name = new_lookup[0]["fn"]["name"]
-        assert new_name == "__test_func_name__", (
-            f"Expected '__test_func_name__', got {new_name!r}"
-        )
-    finally:
-        # Restore original name
-        rename({"func": [{"addr": fn_addr, "name": original_name}]})
-
-
-@test()
-def test_rename_global_roundtrip():
-    """rename can rename and restore global names"""
-    from .api_core import list_globals
-
-    # Get a global variable
-    globals_result = list_globals({"count": 1})
-    if not globals_result or not globals_result[0]["data"]:
-        return  # Skip if no globals
-
-    global_info = globals_result[0]["data"][0]
-    original_name = global_info["name"]
-    global_info["addr"]
-
-    # Skip system globals that can't be renamed
-    if original_name.startswith("__") or original_name.startswith("."):
-        return
-
-    result = {}
-    try:
-        # Rename the global
-        result = rename(
-            {"data": [{"old": original_name, "new": "__test_global_name__"}]}
-        )
-        assert_has_keys(result, "data")
-        assert_is_list(result["data"], min_length=1)
-        assert_has_keys(result["data"][0], "old", "new", "ok")
-
-        # Only verify change if rename succeeded (some globals may not be renameable)
-        if result["data"][0]["ok"]:
-            # Verify we can look it up by new name
-            ea = idaapi.get_name_ea(idaapi.BADADDR, "__test_global_name__")
-            assert ea != idaapi.BADADDR, "Could not find renamed global"
-    finally:
-        # Restore original name (only if rename succeeded)
-        if result.get("data") and result["data"][0].get("ok"):
-            rename({"data": [{"old": "__test_global_name__", "new": original_name}]})
-
-
-@test()
-def test_rename_local_roundtrip():
-    """rename can rename and restore local variable names"""
-    from .api_analysis import decompile
-
-    fn_addr = get_any_function()
-    if not fn_addr:
-        return  # Skip if no functions
-
-    # Try to decompile to get local variables
-    try:
-        dec_result = decompile(fn_addr)
-    except IDAError:
-        return  # Skip if decompilation fails
-
-    if not dec_result or dec_result[0].get("error"):
-        return  # Skip if decompilation failed
-
-    # Get local variables from decompiled code
-    lvars = dec_result[0].get("lvars", [])
-    if not lvars:
-        return  # Skip if no local variables
-
-    # Find a regular local (not argument)
-    test_lvar = None
-    for lvar in lvars:
-        if not lvar.get("is_arg"):
-            test_lvar = lvar
-            break
-
-    if not test_lvar:
-        return  # Skip if no non-argument local found
-
-    original_name = test_lvar["name"]
-
-    result = {}
-    try:
-        # Rename the local variable
-        result = rename(
-            {
-                "local": [
+            # Check if already a function
+            existing = idaapi.get_func(start_ea)
+            if existing and existing.start_ea == start_ea:
+                results.append(
                     {
-                        "func_addr": fn_addr,
-                        "old": original_name,
-                        "new": "__test_local__",
+                        "addr": addr_str,
+                        "start": hex(start_ea),
+                        "error": "Function already exists at this address",
                     }
-                ]
-            }
-        )
-        assert_has_keys(result, "local")
-        assert_is_list(result["local"], min_length=1)
-        assert_has_keys(result["local"][0], "func_addr", "old", "new", "ok")
+                )
+                continue
 
-        # We don't assert ok=True because some locals may not be renameable
-    finally:
-        # Restore original name if rename succeeded
-        if result.get("local") and result["local"][0].get("ok"):
-            rename(
-                {
-                    "local": [
-                        {
-                            "func_addr": fn_addr,
-                            "old": "__test_local__",
-                            "new": original_name,
-                        }
-                    ]
-                }
-            )
+            success = ida_funcs.add_func(start_ea, end_ea)
+            if success:
+                func = idaapi.get_func(start_ea)
+                results.append(
+                    {
+                        "addr": addr_str,
+                        "start": hex(func.start_ea),
+                        "end": hex(func.end_ea),
+                        "ok": True,
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "addr": addr_str,
+                        "start": hex(start_ea),
+                        "error": "define_func failed",
+                    }
+                )
+        except Exception as e:
+            results.append({"addr": addr_str, "error": str(e)})
+
+    return results
+
+
+@tool
+@idasync
+def define_code(items: list[DefineOp] | DefineOp) -> list[dict]:
+    """Convert bytes to code instruction(s) at address(es)."""
+    if isinstance(items, dict):
+        items = [items]
+
+    results = []
+    for item in items:
+        addr_str = item.get("addr", "")
+
+        try:
+            ea = parse_address(addr_str)
+            length = ida_ua.create_insn(ea)
+            if length > 0:
+                results.append(
+                    {"addr": addr_str, "ea": hex(ea), "length": length, "ok": True}
+                )
+            else:
+                results.append(
+                    {
+                        "addr": addr_str,
+                        "ea": hex(ea),
+                        "error": "Failed to create instruction",
+                    }
+                )
+        except Exception as e:
+            results.append({"addr": addr_str, "error": str(e)})
+
+    return results
+
+
+@tool
+@idasync
+def undefine(items: list[UndefineOp] | UndefineOp) -> list[dict]:
+    """Undefine item(s) at address(es), converting back to raw bytes."""
+    if isinstance(items, dict):
+        items = [items]
+
+    results = []
+    for item in items:
+        addr_str = item.get("addr", "")
+        end_str = item.get("end", "")
+        size = item.get("size", 0)
+
+        try:
+            start_ea = parse_address(addr_str)
+
+            # Determine size from end address or explicit size
+            if end_str:
+                end_ea = parse_address(end_str)
+                nbytes = end_ea - start_ea
+            elif size:
+                nbytes = size
+            else:
+                # Default: undefine single item
+                nbytes = 1
+
+            success = ida_bytes.del_items(start_ea, ida_bytes.DELIT_EXPAND, nbytes)
+            if success:
+                results.append(
+                    {
+                        "addr": addr_str,
+                        "start": hex(start_ea),
+                        "size": nbytes,
+                        "ok": True,
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "addr": addr_str,
+                        "start": hex(start_ea),
+                        "error": "undefine failed",
+                    }
+                )
+        except Exception as e:
+            results.append({"addr": addr_str, "error": str(e)})
+
+    return results

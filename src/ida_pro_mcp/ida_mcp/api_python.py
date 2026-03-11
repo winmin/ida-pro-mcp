@@ -139,11 +139,17 @@ def py_eval(
                 # Execute all statements except the last
                 if len(tree.body) > 1:
                     exec_tree = ast.Module(body=tree.body[:-1], type_ignores=[])
-                    exec(compile(exec_tree, "<string>", "exec"), exec_globals, exec_locals)
+                    exec(
+                        compile(exec_tree, "<string>", "exec"),
+                        exec_globals,
+                        exec_locals,
+                    )
                     exec_globals.update(exec_locals)
                 # Eval only the last expression
                 eval_tree = ast.Expression(body=tree.body[-1].value)
-                result_value = str(eval(compile(eval_tree, "<string>", "eval"), exec_globals))
+                result_value = str(
+                    eval(compile(eval_tree, "<string>", "eval"), exec_globals)
+                )
             else:
                 # All statements (no trailing expression)
                 exec(code, exec_globals, exec_locals)

@@ -14,15 +14,7 @@ import ida_xref
 import ida_ua
 import ida_name
 from .rpc import tool
-from .sync import idasync, tool_timeout, is_window_active
-from .tests import (
-    test,
-    assert_has_keys,
-    assert_non_empty,
-    assert_is_list,
-    get_any_function,
-    get_any_string,
-)
+from .sync import idasync, tool_timeout, IDAError
 from .utils import (
     parse_address,
     normalize_list_input,
@@ -39,12 +31,24 @@ from .utils import (
     BasicBlock,
     StructFieldQuery,
 )
+from . import compat
 
 # ============================================================================
 # Instruction Helpers
 # ============================================================================
 
 _IMM_SCAN_BACK_MAX = 15
+
+
+def _raw_bin_search(
+    ea: int, max_ea: int, data: bytes, mask: bytes, flags: int = 0
+) -> int:
+    """Search for raw bytes with mask, compatible across IDA versions.
+
+    Returns the match address, or idaapi.BADADDR if not found.
+    """
+    search_flags = flags or (ida_bytes.BIN_SEARCH_FORWARD | ida_bytes.BIN_SEARCH_NOSHOW)
+    return compat.raw_bin_search(ea, max_ea, data, mask, search_flags)
 
 
 def _decode_insn_at(ea: int) -> ida_ua.insn_t | None:
@@ -161,11 +165,21 @@ def _resolve_immediate_insn_start(
 @idasync
 @tool_timeout(90.0)
 def decompile(
-    addr: Annotated[str, "Function address to decompile"],
+    addr: Annotated[str, "Function address or name to decompile"],
 ) -> dict:
     """Decompile function to pseudocode"""
     try:
-        start = parse_address(addr)
+        try:
+            start = parse_address(addr)
+        except IDAError:
+            ea = idaapi.get_name_ea(idaapi.BADADDR, addr)
+            if ea == idaapi.BADADDR:
+                return {
+                    "addr": addr,
+                    "code": None,
+                    "error": f"Function not found: {addr!r}",
+                }
+            start = ea
         code = decompile_function_safe(start)
         if code is None:
             return {"addr": addr, "code": None, "error": "Decompilation failed"}
@@ -178,7 +192,7 @@ def decompile(
 @idasync
 @tool_timeout(90.0)
 def disasm(
-    addr: Annotated[str, "Function address to disassemble"],
+    addr: Annotated[str, "Function address or name to disassemble"],
     max_instructions: Annotated[
         int, "Max instructions per function (default: 5000, max: 50000)"
     ] = 5000,
@@ -196,7 +210,18 @@ def disasm(
         offset = 0
 
     try:
-        start = parse_address(addr)
+        try:
+            start = parse_address(addr)
+        except IDAError:
+            ea = idaapi.get_name_ea(idaapi.BADADDR, addr)
+            if ea == idaapi.BADADDR:
+                return {
+                    "addr": addr,
+                    "asm": None,
+                    "error": f"Function not found: {addr!r}",
+                    "cursor": {"done": True},
+                }
+            start = ea
         func = idaapi.get_func(start)
 
         # Get segment info
@@ -545,24 +570,29 @@ def find_bytes(
     if limit <= 0 or limit > 10000:
         limit = 10000
 
+    # Build a reusable search closure based on available IDA API
+    def _make_searcher(pattern: str):
+        """Return a (searcher_fn, error_str|None) for the given pattern.
+
+        searcher_fn(ea, max_ea) -> ea_t  (BADADDR if not found)
+        """
+        return compat.make_bytes_searcher(pattern)
+
     results = []
     for pattern in patterns:
         matches = []
         skipped = 0
         more = False
         try:
-            # Parse the pattern
-            compiled = ida_bytes.compiled_binpat_vec_t()
-            err = ida_bytes.parse_binpat_str(
-                compiled, ida_ida.inf_get_min_ea(), pattern, 16
-            )
-            if err:
+            searcher, build_err = _make_searcher(pattern)
+            if build_err is not None:
                 results.append(
                     {
                         "pattern": pattern,
                         "matches": [],
                         "n": 0,
                         "cursor": {"done": True},
+                        "error": build_err,
                     }
                 )
                 continue
@@ -571,24 +601,30 @@ def find_bytes(
             ea = ida_ida.inf_get_min_ea()
             max_ea = ida_ida.inf_get_max_ea()
             while ea != idaapi.BADADDR:
-                ea = ida_bytes.bin_search(
-                    ea, max_ea, compiled, ida_bytes.BIN_SEARCH_FORWARD
-                )
-                if ea != idaapi.BADADDR:
-                    if skipped < offset:
-                        skipped += 1
-                    else:
-                        matches.append(hex(ea))
-                        if len(matches) >= limit:
-                            # Check if there's more
-                            next_ea = ida_bytes.bin_search(
-                                ea + 1, max_ea, compiled, ida_bytes.BIN_SEARCH_FORWARD
-                            )
-                            more = next_ea != idaapi.BADADDR
-                            break
-                    ea += 1
-        except Exception:
-            pass
+                ea = searcher(ea, max_ea)
+                if ea == idaapi.BADADDR:
+                    break
+                if skipped < offset:
+                    skipped += 1
+                else:
+                    matches.append(hex(ea))
+                    if len(matches) >= limit:
+                        # Check if there's more
+                        next_ea = searcher(ea + 1, max_ea)
+                        more = next_ea != idaapi.BADADDR
+                        break
+                ea += 1
+        except Exception as e:
+            results.append(
+                {
+                    "pattern": pattern,
+                    "matches": [],
+                    "n": 0,
+                    "cursor": {"done": True},
+                    "error": str(e),
+                }
+            )
+            continue
 
         results.append(
             {
@@ -733,24 +769,16 @@ def find(
                 ea = ida_ida.inf_get_min_ea()
                 max_ea = ida_ida.inf_get_max_ea()
                 mask = b"\xff" * len(pattern_bytes)
-                flags = ida_bytes.BIN_SEARCH_FORWARD | ida_bytes.BIN_SEARCH_NOSHOW
                 while ea != idaapi.BADADDR:
-                    ea = ida_bytes.bin_search(
-                        ea, max_ea, pattern_bytes, mask, len(pattern_bytes), flags
-                    )
+                    ea = _raw_bin_search(ea, max_ea, pattern_bytes, mask)
                     if ea != idaapi.BADADDR:
                         if skipped < offset:
                             skipped += 1
                         else:
                             matches.append(hex(ea))
                             if len(matches) >= limit:
-                                next_ea = ida_bytes.bin_search(
-                                    ea + 1,
-                                    max_ea,
-                                    pattern_bytes,
-                                    mask,
-                                    len(pattern_bytes),
-                                    flags,
+                                next_ea = _raw_bin_search(
+                                    ea + 1, max_ea, pattern_bytes, mask
                                 )
                                 more = next_ea != idaapi.BADADDR
                                 break
@@ -802,13 +830,8 @@ def find(
                     for normalized, size, pattern_bytes in candidates:
                         ea = seg.start_ea
                         while ea != idaapi.BADADDR and ea < seg.end_ea:
-                            ea = ida_bytes.bin_search(
-                                ea,
-                                seg.end_ea,
-                                pattern_bytes,
-                                b"\xff" * size,
-                                size,
-                                ida_bytes.BIN_SEARCH_FORWARD,
+                            ea = _raw_bin_search(
+                                ea, seg.end_ea, pattern_bytes, b"\xff" * size
                             )
                             if ea == idaapi.BADADDR:
                                 break

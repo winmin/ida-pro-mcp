@@ -44,11 +44,10 @@ For the original IDA Pro MCP plugin (GUI mode, tool documentation, prompt engine
 ## Prerequisites
 
 - [Python](https://www.python.org/downloads/) **3.11+**
-- [IDA Pro](https://hex-rays.com/ida-pro) **9.1+** with [idalib](https://docs.hex-rays.com/user-guide/idalib) installed (**IDA Free is not supported**)
+- [IDA Pro](https://hex-rays.com/ida-pro) **9.1+** (**IDA Free is not supported**)
 - Set environment variables:
   ```sh
-  export IDALIB_PATH=/path/to/ida/idalib
-  export IDAPRO_PATH=/path/to/ida
+  export IDADIR=/path/to/ida
   ```
 
 ## Installation

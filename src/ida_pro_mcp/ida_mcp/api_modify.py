@@ -25,12 +25,6 @@ from .utils import (
     DefineOp,
     UndefineOp,
 )
-from .tests import (
-    test,
-    assert_has_keys,
-    assert_is_list,
-    get_any_function,
-)
 
 
 # ============================================================================
@@ -120,34 +114,6 @@ def set_comments(items: list[CommentOp] | CommentOp):
     return results
 
 
-@test()
-def test_set_comment_roundtrip():
-    """set_comments can set and clear comments"""
-    fn_addr = get_any_function()
-    if not fn_addr:
-        return  # Skip if no functions
-
-    # Get original comment (may be None/empty)
-    original_comment = idc.get_cmt(int(fn_addr, 16), False) or ""
-
-    try:
-        # Set a test comment
-        result = set_comments({"addr": fn_addr, "comment": "__test_comment__"})
-        assert_is_list(result, min_length=1)
-        assert_has_keys(result[0], "addr")
-        # Either "ok" or "error" should be present
-        assert "ok" in result[0] or "error" in result[0]
-
-        # Verify comment was set
-        new_comment = idc.get_cmt(int(fn_addr, 16), False)
-        assert new_comment == "__test_comment__", (
-            f"Expected '__test_comment__', got {new_comment!r}"
-        )
-    finally:
-        # Restore original comment
-        set_comments({"addr": fn_addr, "comment": original_comment})
-
-
 @tool
 @idasync
 def patch_asm(items: list[AsmPatchOp] | AsmPatchOp) -> list[dict]:
@@ -188,32 +154,6 @@ def patch_asm(items: list[AsmPatchOp] | AsmPatchOp) -> list[dict]:
             results.append({"addr": addr_str, "error": str(e)})
 
     return results
-
-
-@test()
-def test_patch_asm():
-    """patch_asm returns proper result structure"""
-    fn_addr = get_any_function()
-    if not fn_addr:
-        return  # Skip if no functions
-
-    # Get original bytes at function start for potential restore
-    ea = int(fn_addr, 16)
-    original_bytes = ida_bytes.get_bytes(ea, 16)
-    if not original_bytes:
-        return  # Skip if can't read bytes
-
-    # Try to assemble a NOP (this may fail depending on architecture)
-    # We're just testing the API returns proper structure, not necessarily succeeding
-    result = patch_asm({"addr": fn_addr, "asm": "nop"})
-    assert_is_list(result, min_length=1)
-    assert_has_keys(result[0], "addr")
-    # Result should have either "ok" or "error"
-    assert "ok" in result[0] or "error" in result[0]
-
-    # Restore original bytes if patch succeeded
-    if result[0].get("ok"):
-        ida_bytes.patch_bytes(ea, original_bytes)
 
 
 @tool

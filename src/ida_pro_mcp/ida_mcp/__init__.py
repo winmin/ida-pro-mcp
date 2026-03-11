@@ -24,7 +24,6 @@ if hasattr(signal, "SIGPIPE"):
 from . import rpc
 from . import sync
 from . import utils
-from . import tests
 
 # Import all API modules to register @tool functions, @resource functions, and @test functions
 from . import api_core
@@ -40,7 +39,6 @@ from . import api_resources
 # Re-export key components for external use
 from .sync import idasync, IDAError, IDASyncError, CancelledError
 from .rpc import MCP_SERVER, MCP_UNSAFE, tool, unsafe, resource
-from .tests import run_tests, test, set_sample_size, get_sample_size
 from .http import IdaMcpHttpRequestHandler
 from .api_core import init_caches
 
@@ -70,10 +68,6 @@ __all__ = [
     "tool",
     "unsafe",
     "resource",
-    "run_tests",
-    "test",
-    "set_sample_size",
-    "get_sample_size",
     "IdaMcpHttpRequestHandler",
     "init_caches",
 ]

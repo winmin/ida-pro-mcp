@@ -44,11 +44,10 @@
 ## 前置条件
 
 - [Python](https://www.python.org/downloads/) **3.11+**
-- [IDA Pro](https://hex-rays.com/ida-pro) **9.1+** 并安装 [idalib](https://docs.hex-rays.com/user-guide/idalib)（**不支持 IDA Free**）
+- [IDA Pro](https://hex-rays.com/ida-pro) **9.1+**（**不支持 IDA Free**）
 - 设置环境变量：
   ```sh
-  export IDALIB_PATH=/path/to/ida/idalib
-  export IDAPRO_PATH=/path/to/ida
+  export IDADIR=/path/to/ida
   ```
 
 ## 安装

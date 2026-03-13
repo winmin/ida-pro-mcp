@@ -20,6 +20,7 @@ Usage:
 import os
 import sys
 import ast
+import atexit
 import json
 import time
 import uuid
@@ -912,8 +913,21 @@ def main():
     server = SessionMcpServer(unsafe=args.unsafe, verbose=args.verbose)
     server.mcp.auth_token = args.auth_token
 
+    _cleanup_done = False
+
+    def _do_cleanup():
+        nonlocal _cleanup_done
+        if _cleanup_done:
+            return
+        _cleanup_done = True
+        logger.info("Cleaning up sessions (saving IDBs)...")
+        server.cleanup()
+
+    # atexit as safety net for cases where signals are not delivered
+    atexit.register(_do_cleanup)
+
     def signal_handler(signum, frame):
-        logger.info("Shutting down...")
+        logger.info("Received signal %s, shutting down...", signum)
         # Stop the HTTP server from a background thread to avoid deadlock
         # (shutdown() waits for serve_forever() to finish, but serve_forever()
         # is running on this same main thread)
@@ -935,7 +949,7 @@ def main():
     except (KeyboardInterrupt, EOFError):
         pass
     finally:
-        server.cleanup()
+        _do_cleanup()
 
 
 if __name__ == "__main__":

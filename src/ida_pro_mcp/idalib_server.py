@@ -1,5 +1,6 @@
 import os
 import sys
+import atexit
 import signal
 import logging
 import argparse
@@ -344,12 +345,23 @@ def main():
             "No initial binary specified. Use idalib_open() to load binaries dynamically."
         )
 
-    # Setup signal handlers to ensure IDA database is properly closed on shutdown.
-    def cleanup_and_exit(signum, frame):
-        logger.info("Shutting down...")
-        logger.info("Closing all IDA sessions...")
+    _cleanup_done = False
+
+    def _do_cleanup():
+        nonlocal _cleanup_done
+        if _cleanup_done:
+            return
+        _cleanup_done = True
+        logger.info("Closing all IDA sessions (saving IDBs)...")
         session_manager.close_all_sessions()
-        logger.info("All sessions closed.")
+        logger.info("All sessions closed and saved.")
+
+    # atexit as safety net for cases where signals are not delivered
+    atexit.register(_do_cleanup)
+
+    def cleanup_and_exit(signum, frame):
+        logger.info("Received signal %s, shutting down...", signum)
+        _do_cleanup()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, cleanup_and_exit)
@@ -359,7 +371,10 @@ def main():
     # This ensures IDA operations run on the main thread, avoiding execute_sync issues
     # Note: SSE won't work properly in this mode, but Streamable HTTP works fine
     MCP_SERVER.auth_token = args.auth_token
-    MCP_SERVER.serve(host=args.host, port=args.port, background=False, threaded=False)
+    try:
+        MCP_SERVER.serve(host=args.host, port=args.port, background=False, threaded=False)
+    finally:
+        _do_cleanup()
 
 
 if __name__ == "__main__":

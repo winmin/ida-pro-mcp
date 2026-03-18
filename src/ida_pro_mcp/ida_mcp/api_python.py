@@ -34,10 +34,7 @@ from .utils import parse_address, get_function
 def py_eval(
     code: Annotated[str, "Python code"],
 ) -> dict:
-    """Execute Python code in IDA context.
-    Returns dict with result/stdout/stderr.
-    Has access to all IDA API modules.
-    Supports Jupyter-style evaluation."""
+    """Execute Python in IDA context and return result/stdout/stderr."""
     # Capture stdout/stderr
     stdout_capture = io.StringIO()
     stderr_capture = io.StringIO()
@@ -139,11 +136,17 @@ def py_eval(
                 # Execute all statements except the last
                 if len(tree.body) > 1:
                     exec_tree = ast.Module(body=tree.body[:-1], type_ignores=[])
-                    exec(compile(exec_tree, "<string>", "exec"), exec_globals, exec_locals)
+                    exec(
+                        compile(exec_tree, "<string>", "exec"),
+                        exec_globals,
+                        exec_locals,
+                    )
                     exec_globals.update(exec_locals)
                 # Eval only the last expression
                 eval_tree = ast.Expression(body=tree.body[-1].value)
-                result_value = str(eval(compile(eval_tree, "<string>", "eval"), exec_globals))
+                result_value = str(
+                    eval(compile(eval_tree, "<string>", "eval"), exec_globals)
+                )
             else:
                 # All statements (no trailing expression)
                 exec(code, exec_globals, exec_locals)

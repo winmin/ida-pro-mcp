@@ -108,6 +108,7 @@ class PoolManager:
         logger.info("Spawning instance: %s", " ".join(cmd))
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )

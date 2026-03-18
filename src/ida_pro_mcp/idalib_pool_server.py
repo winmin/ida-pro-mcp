@@ -301,12 +301,8 @@ def main():
         "--verbose", "-v", action="store_true", help="Show debug messages"
     )
     parser.add_argument(
-        "--host", type=str, default="127.0.0.1",
-        help="Host to listen on (default: 127.0.0.1)",
-    )
-    parser.add_argument(
-        "--port", type=int, default=8750,
-        help="Port to listen on (default: 8750)",
+        "--transport", type=str, default="stdio",
+        help="Transport: 'stdio' (default) or a URL (e.g. http://127.0.0.1:8750)",
     )
     parser.add_argument(
         "--max-instances", type=int, default=1,
@@ -376,7 +372,16 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
-    mcp.serve(host=args.host, port=args.port, background=False)
+    transport = args.transport
+    if transport == "stdio":
+        mcp.stdio()
+    else:
+        from urllib.parse import urlparse
+        url = urlparse(transport)
+        if not url.hostname or not url.port:
+            print(f"Error: invalid transport URL: {transport}", file=sys.stderr)
+            sys.exit(1)
+        mcp.serve(host=url.hostname, port=url.port, background=False)
 
 
 if __name__ == "__main__":

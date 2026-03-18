@@ -1,7 +1,6 @@
 name: idalib-tests
 on:
-  push:
-  pull_request_target:
+  workflow_dispatch:
 
 jobs:
   idalib-tests:

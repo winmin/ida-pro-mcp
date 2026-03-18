@@ -79,24 +79,24 @@ _SESSION_ID_SCHEMA: dict = {
 }
 
 
-def _inject_session_id(tools: list[dict]) -> list[dict]:
-    """Add an optional ``session_id`` parameter to every tool's input schema."""
+def _prepare_tools(tools: list[dict]) -> list[dict]:
+    """Prepare tool schemas for the proxy.
+
+    Management tools (idalib_*) are kept as-is — they already have their own
+    session_id parameter where needed.  All other IDA tools get an optional
+    ``session_id`` parameter injected so clients can route per-tool.
+    """
     result = []
     for tool in tools:
         tool = copy.deepcopy(tool)
-        schema = tool.setdefault("inputSchema", {})
-        props = schema.setdefault("properties", {})
-        if "session_id" not in props:
-            props["session_id"] = _SESSION_ID_SCHEMA
-        # session_id is always optional — never add to "required"
-        tool["inputSchema"] = schema
+        name = tool.get("name", "")
+        if name not in IDALIB_MANAGEMENT_TOOLS:
+            schema = tool.setdefault("inputSchema", {})
+            props = schema.setdefault("properties", {})
+            if "session_id" not in props:
+                props["session_id"] = _SESSION_ID_SCHEMA
         result.append(tool)
     return result
-
-
-def _filter_management_tools(tools: list[dict]) -> list[dict]:
-    """Remove idalib_* management tools that the proxy handles itself."""
-    return [t for t in tools if t.get("name") not in IDALIB_MANAGEMENT_TOOLS]
 
 
 # --------------------------------------------------------------------------
@@ -113,8 +113,7 @@ def build_dispatch(mcp: McpServer, pool: PoolManager):
         nonlocal _tools_cache
         if _tools_cache is None:
             raw = pool.forward_tools_list()
-            raw = _filter_management_tools(raw)
-            _tools_cache = _inject_session_id(raw)
+            _tools_cache = _prepare_tools(raw)
         return _tools_cache
 
     def _error_response(request_id: Any, code: int, message: str) -> JsonRpcResponse:
@@ -239,16 +238,9 @@ def build_dispatch(mcp: McpServer, pool: PoolManager):
     # --- tools/list handler ---
 
     def _handle_tools_list(request_obj: dict) -> JsonRpcResponse:
-        # Get local tools (initialize etc) from original dispatch
-        local_resp = dispatch_original(request_obj)
-        local_tools = (local_resp or {}).get("result", {}).get("tools", [])
-
-        # Get IDA tools from cache
-        ida_tools = _ensure_tools_cache()
-
         return {
             "jsonrpc": "2.0",
-            "result": {"tools": local_tools + ida_tools},
+            "result": {"tools": _ensure_tools_cache()},
             "id": request_obj.get("id"),
         }
 

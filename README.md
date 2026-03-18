@@ -108,6 +108,37 @@ cd ida-pro-mcp
 uv run idalib-pool
 ```
 
+## Docker Deployment
+
+> **Note:** Due to IDA Pro licensing restrictions, we do not provide the IDA Pro base image. You need to build an `ida-pro:latest` Docker image yourself that contains a licensed IDA Pro (with idalib) installation.
+
+### Build
+
+```bash
+docker build -t ida-mcp .
+```
+
+### Run
+
+```bash
+docker run -p 8745:8745 -v /path/to/binaries:/data ida-mcp
+```
+
+Mount the binaries to analyze into the `/data` directory. The MCP service listens on `0.0.0.0:8745` by default.
+
+Environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRANSPORT` | `http://0.0.0.0:8745` | Transport URL |
+| `MAX_INSTANCES` | `10` | Max concurrent idalib instances |
+
+### Connect from Claude Code
+
+```bash
+claude mcp add --transport http --scope user ida-pro-mcp http://<host>:8745/mcp
+```
+
 ## MCP Client Configuration
 
 **Claude Code / Claude Desktop (stdio, recommended):**

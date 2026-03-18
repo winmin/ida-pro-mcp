@@ -108,6 +108,37 @@ cd ida-pro-mcp
 uv run idalib-pool
 ```
 
+## Docker 部署
+
+> **注意：** 由于 IDA Pro 版权限制，我们不提供 IDA Pro 基础镜像。你需要自行构建一个包含已授权 IDA Pro（含 idalib）的 `ida-pro:latest` Docker 镜像。
+
+### 构建
+
+```bash
+docker build -t ida-mcp .
+```
+
+### 运行
+
+```bash
+docker run -p 8745:8745 -v /path/to/binaries:/data ida-mcp
+```
+
+将待分析的文件挂载到容器内 `/data` 目录。MCP 服务默认监听 `0.0.0.0:8745`。
+
+环境变量：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `TRANSPORT` | `http://0.0.0.0:8745` | 传输协议 URL |
+| `MAX_INSTANCES` | `10` | 最大并发 idalib 实例数 |
+
+### 从 Claude Code 接入
+
+```bash
+claude mcp add --transport http --scope user ida-pro-mcp http://<host>:8745/mcp
+```
+
 ## MCP 客户端配置
 
 **Claude Code / Claude Desktop（stdio，推荐）：**

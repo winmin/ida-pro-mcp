@@ -35,3 +35,9 @@ scalene-profile.json
 
 # MCP config
 .mcp.json
+
+# IDE / editor
+.history/
+
+# Notes
+plan.md

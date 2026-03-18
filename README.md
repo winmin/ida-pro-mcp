@@ -1,136 +1,163 @@
-# idalib-session-mcp
+# IDA Pro MCP
 
 [中文版](README_zh.md) | English
 
-A session-aware, multi-agent MCP server for headless IDA Pro reverse engineering. Built on top of [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) by [@mrexodia](https://github.com/mrexodia).
+MCP Server for IDA Pro reverse engineering. Fork of [mrexodia/ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) with multi-binary pool proxy and infrastructure improvements.
 
-## What is this?
+## What's different from upstream?
 
-This fork extends ida-pro-mcp with `idalib-session-mcp` — a headless MCP server that manages multiple IDA analysis sessions simultaneously. Each binary runs in its own isolated idalib subprocess, and LLM agents can open, switch, and close sessions dynamically.
+This fork adds:
 
-For the original IDA Pro MCP plugin (GUI mode, tool documentation, prompt engineering tips, etc.), please refer to the **upstream repository**: [mrexodia/ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp).
+- **`idalib-pool`** — a proxy server that manages a pool of idalib instances for concurrent multi-binary analysis
+- **Unix domain socket** support for idalib server (avoids TCP port conflicts)
+- **`execute_sync` deadlock fix** for headless idalib mode
+- **Bearer token authentication** (`--auth-token` / `IDA_MCP_AUTH_TOKEN`)
+- **stdio / HTTP / SSE transport** for the pool proxy
 
-## Key Features
+For the original IDA Pro MCP plugin (GUI mode, tool documentation, prompt engineering, etc.), see the upstream: [mrexodia/ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp).
 
-- **Multi-session management**: Open and analyze multiple binaries simultaneously, each in its own idalib subprocess
-- **Multi-agent safe**: Every IDA tool has an optional `session_id` parameter — agents can explicitly route calls to specific sessions without relying on global state
-- **No cross-contamination**: Agent A switching sessions will not affect Agent B's explicit `session_id` calls
-- **62 tools at startup**: AST-based static extraction from IDA API source files provides all tool schemas immediately, before any binary is opened
-- **Graceful shutdown**: Ctrl+C cleanly saves all IDBs and terminates child processes
+## Three ways to run
 
-## Architecture
+| Mode | Command | Use case |
+|------|---------|----------|
+| **GUI plugin** | `ida-pro-mcp` | Connecting to IDA Pro with GUI open |
+| **Headless single** | `idalib-mcp [binary]` | Analyzing one binary without GUI |
+| **Headless pool** | `idalib-pool [binary]` | Analyzing multiple binaries concurrently |
+
+## idalib-pool: Multi-Binary Analysis
+
+The pool proxy manages multiple idalib instances behind a single MCP endpoint. Each instance holds one active IDB — no in-process switching overhead.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│              idalib-session-mcp                     │
-│                                                     │
-│   ┌─────────────────────────────────────────────┐   │
-│   │  Session Manager (MCP Server)               │   │
-│   │  - session_open / close / switch / list     │   │
-│   │  - Routes tool calls by session_id          │   │
-│   │  - AST-extracted tool schemas (57 IDA tools)│   │
-│   └──────┬──────────────┬───────────────────────┘   │
-│          │              │                           │
-│   ┌──────▼──────┐ ┌─────▼───────┐                   │
-│   │ idalib:13400│ │ idalib:13401│  ...               │
-│   │ binary_a    │ │ binary_b    │                    │
-│   └─────────────┘ └─────────────┘                   │
-└─────────────────────────────────────────────────────┘
-        ▲                    ▲
-        │ session_id=abc     │ session_id=def
-   Agent A              Agent B
+MCP Client
+    │
+    ▼  stdio / HTTP :8750
+┌───────────────────────────┐
+│  idalib-pool (proxy)       │
+│  routes by session_id      │
+└───┬───────────┬────────────┘
+    │           │
+  unix sock   unix sock
+    ▼           ▼
+┌─────────┐ ┌─────────┐
+│ idalib#0 │ │ idalib#1 │
+│ httpd    │ │ libcrypto│
+└─────────┘ └─────────┘
+```
+
+### Key features
+
+- **1 instance = 1 session**: no IDB switching, no thrashing
+- **Optional `session_id`** on every IDA tool: omit for default session, specify for explicit routing. Parallel calls to different sessions are safe.
+- **`idalib_switch`** only changes the default session pointer — zero IDB cost
+- **LRU eviction** when pool is full (`--max-instances N`)
+- **Unlimited mode** (`--max-instances 0`): fresh instance per open, destroy on close
+- **Path dedup**: re-opening the same binary returns the existing session
+
+### Usage
+
+```sh
+# stdio (default, for MCP clients like Claude Desktop)
+idalib-pool
+
+# stdio with initial binary
+idalib-pool /path/to/binary
+
+# HTTP/SSE mode
+idalib-pool --transport http://127.0.0.1:8750
+
+# Multi-instance pool
+idalib-pool --max-instances 3
+
+# With authentication
+idalib-pool --auth-token mysecret
+# or: IDA_MCP_AUTH_TOKEN=mysecret idalib-pool
+```
+
+### Workflow example
+
+```
+idalib_open("/firmware/httpd")        → session "httpd-01" (default)
+idalib_open("/firmware/libcrypto.so") → session "crypto-01"
+
+# Explicit routing — parallel safe
+decompile("main", session_id="httpd-01")
+decompile("SSL_connect", session_id="crypto-01")
+
+# Or switch default and omit session_id
+idalib_switch("crypto-01")
+decompile("SSL_connect")  → routes to crypto-01
 ```
 
 ## Prerequisites
 
 - [Python](https://www.python.org/downloads/) **3.11+**
-- [IDA Pro](https://hex-rays.com/ida-pro) **9.1+** with [idalib](https://docs.hex-rays.com/user-guide/idalib) installed (**IDA Free is not supported**)
-- Set environment variables:
-  ```sh
-  export IDALIB_PATH=/path/to/ida/idalib
-  export IDAPRO_PATH=/path/to/ida
-  ```
+- [IDA Pro](https://hex-rays.com/ida-pro) **8.3+** (9.0+ recommended) with [idalib](https://docs.hex-rays.com/user-guide/idalib) — **IDA Free is not supported**
+- Set `IDADIR` to your IDA installation path
 
 ## Installation
 
 ```sh
-pip install https://github.com/WinMin/ida-pro-mcp/archive/refs/heads/main.zip
+pip install https://github.com/zh-explorer/ida-pro-mcp/archive/refs/heads/dev.zip
 ```
 
-## Usage
-
-### Start the server
-
+Or from source:
 ```sh
-# stdio transport (default, used by most MCP clients)
-idalib-session-mcp
-
-# SSE/HTTP transport (for remote/headless use)
-idalib-session-mcp --transport http://127.0.0.1:8744/sse
+git clone https://github.com/zh-explorer/ida-pro-mcp
+cd ida-pro-mcp
+uv run idalib-pool
 ```
 
-### MCP client configuration
+## MCP Client Configuration
 
-**Claude Code / Claude Desktop (stdio):**
+**Claude Code / Claude Desktop (stdio, recommended):**
 ```json
 {
   "mcpServers": {
-    "idalib-session-mcp": {
-      "command": "idalib-session-mcp",
-      "args": []
+    "ida-pro-mcp": {
+      "command": "idalib-pool"
     }
   }
 }
 ```
 
-**Claude Code / Claude Desktop (SSE):**
+**HTTP/SSE mode:**
 ```json
 {
   "mcpServers": {
-    "idalib-session-mcp": {
-      "type": "sse",
-      "url": "http://127.0.0.1:8744/sse"
+    "ida-pro-mcp": {
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
 ```
 
-**From source:**
+**From source with uv:**
 ```json
 {
   "mcpServers": {
-    "idalib-session-mcp": {
+    "ida-pro-mcp": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/ida-pro-mcp", "idalib-session-mcp"]
+      "args": ["run", "--directory", "/path/to/ida-pro-mcp", "idalib-pool"]
     }
   }
 }
 ```
 
-## Session Tools
+## Session Management Tools
 
 | Tool | Description |
 |------|-------------|
-| `session_open(binary_path)` | Open a new analysis session for a binary |
-| `session_list()` | List all active sessions |
-| `session_switch(session_id)` | Switch the active session |
-| `session_close(session_id)` | Close a session (saves IDB) |
-| `session_info(session_id?)` | Get session details (defaults to active) |
-
-## Multi-Agent `session_id` Routing
-
-All 57 IDA tools have an injected optional `session_id` parameter. This allows multiple agents to work on different binaries concurrently without interference:
-
-```
-Agent A: decompile(addr="0x401000", session_id="abc123")  → routes to binary_a
-Agent B: decompile(addr="0x401000", session_id="def456")  → routes to binary_b
-```
-
-If `session_id` is omitted, the call falls back to the current active session (set by `session_switch`).
+| `idalib_open(path, session_id?)` | Open a binary, auto-assign to an instance |
+| `idalib_close(session_id)` | Close a session (saves IDB) |
+| `idalib_switch(session_id)` | Set the default session (no IDB cost) |
+| `idalib_list()` | List all sessions |
+| `idalib_current()` | Get the default session info |
+| `idalib_save(path?)` | Save the active IDB |
 
 ## IDA Tools
 
-All 57 tools from ida-pro-mcp are available. See the [upstream documentation](https://github.com/mrexodia/ida-pro-mcp) for the full tool reference, including:
+66 tools from upstream ida-pro-mcp, all with optional `session_id` routing. See the [upstream documentation](https://github.com/mrexodia/ida-pro-mcp) for details:
 
 - Decompilation & disassembly (`decompile`, `disasm`)
 - Cross-references & call graphs (`xrefs_to`, `callees`, `callgraph`)
@@ -139,9 +166,9 @@ All 57 tools from ida-pro-mcp are available. See the [upstream documentation](ht
 - Type operations (`declare_type`, `set_type`, `infer_types`, `read_struct`)
 - Rename & comment (`rename`, `set_comments`)
 - Pattern search (`find`, `find_bytes`, `find_regex`)
-- Debugger (`dbg_start`, `dbg_step_into`, etc. — requires `--unsafe` flag)
+- Binary survey (`survey_binary` — start here for triage)
 - Python execution (`py_eval`)
 
 ## Acknowledgments
 
-This project is a fork of [mrexodia/ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp). All credit for the core IDA MCP tooling goes to [@mrexodia](https://github.com/mrexodia) and contributors.
+Fork of [mrexodia/ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) by [@mrexodia](https://github.com/mrexodia). Multi-binary pool proxy developed with [@WinMin](https://github.com/WinMin).

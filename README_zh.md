@@ -1,136 +1,163 @@
-# idalib-session-mcp
+# IDA Pro MCP
 
 中文 | [English](README.md)
 
-基于 [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) 的多会话、多 Agent 无头 IDA Pro MCP 服务器。
+IDA Pro 逆向工程 MCP 服务器。基于 [mrexodia/ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) 的 fork，新增多 binary 池代理和基础设施改进。
 
-## 简介
+## 与上游的区别
 
-本项目是 ida-pro-mcp 的 fork，新增了 `idalib-session-mcp` —— 一个无头 MCP 服务器，支持同时管理多个 IDA 分析会话。每个二进制文件在独立的 idalib 子进程中运行，LLM Agent 可以动态地打开、切换和关闭会话。
+本 fork 新增了：
 
-关于原版 IDA Pro MCP 插件（GUI 模式、工具文档、提示词工程等），请参阅**上游仓库**：[mrexodia/ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp)。
+- **`idalib-pool`** — 代理服务器，管理多个 idalib 实例，支持多 binary 并发分析
+- **Unix domain socket** 支持（避免 TCP 端口冲突）
+- **`execute_sync` 死锁修复**（headless idalib 模式）
+- **Bearer token 认证**（`--auth-token` / `IDA_MCP_AUTH_TOKEN`）
+- **stdio / HTTP / SSE 传输** 支持
 
-## 核心特性
+原版 IDA Pro MCP 插件（GUI 模式、工具文档、提示词工程等）请参阅上游：[mrexodia/ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp)。
 
-- **多会话管理**：同时打开和分析多个二进制文件，每个文件在独立的 idalib 子进程中运行
-- **多 Agent 安全**：每个 IDA 工具都有可选的 `session_id` 参数，Agent 可以显式指定目标会话，不依赖全局状态
-- **无交叉污染**：Agent A 切换会话不会影响 Agent B 的显式 `session_id` 调用
-- **启动即可用 62 个工具**：基于 AST 静态解析 IDA API 源码，启动时即提供全部工具 schema，无需先打开二进制文件
-- **优雅退出**：Ctrl+C 会保存所有 IDB 并终止子进程
+## 三种运行方式
 
-## 架构
+| 模式 | 命令 | 适用场景 |
+|------|------|----------|
+| **GUI 插件** | `ida-pro-mcp` | 连接已打开 GUI 的 IDA Pro |
+| **无头单 binary** | `idalib-mcp [binary]` | 不需要 GUI 分析单个 binary |
+| **无头池模式** | `idalib-pool [binary]` | 并发分析多个 binary |
+
+## idalib-pool：多 Binary 分析
+
+池代理在单个 MCP 端点后面管理多个 idalib 实例。每个实例持有一个活跃 IDB——无进程内切换开销。
 
 ```
-┌─────────────────────────────────────────────────────┐
-│              idalib-session-mcp                     │
-│                                                     │
-│   ┌─────────────────────────────────────────────┐   │
-│   │  会话管理器 (MCP Server)                     │   │
-│   │  - session_open / close / switch / list     │   │
-│   │  - 根据 session_id 路由工具调用              │   │
-│   │  - AST 提取的工具 schema (57 个 IDA 工具)    │   │
-│   └──────┬──────────────┬───────────────────────┘   │
-│          │              │                           │
-│   ┌──────▼──────┐ ┌─────▼───────┐                   │
-│   │ idalib:13400│ │ idalib:13401│  ...               │
-│   │ binary_a    │ │ binary_b    │                    │
-│   └─────────────┘ └─────────────┘                   │
-└─────────────────────────────────────────────────────┘
-        ▲                    ▲
-        │ session_id=abc     │ session_id=def
-   Agent A              Agent B
+MCP 客户端
+    │
+    ▼  stdio / HTTP :8750
+┌───────────────────────────┐
+│  idalib-pool (代理)        │
+│  按 session_id 路由        │
+└───┬───────────┬────────────┘
+    │           │
+  unix sock   unix sock
+    ▼           ▼
+┌─────────┐ ┌─────────┐
+│ idalib#0 │ │ idalib#1 │
+│ httpd    │ │ libcrypto│
+└─────────┘ └─────────┘
+```
+
+### 核心特性
+
+- **1 实例 = 1 会话**：无 IDB 切换，无抖动
+- **可选 `session_id`**：所有 IDA 工具都支持。省略则用默认会话，指定则路由到目标会话。并行调用不同会话是安全的。
+- **`idalib_switch`** 只修改默认会话指针——零 IDB 开销
+- **LRU 淘汰**：池满时自动淘汰最久未用的会话（`--max-instances N`）
+- **无限模式**（`--max-instances 0`）：每次 open 启动新实例，close 时销毁
+- **路径去重**：重复打开同一 binary 返回已有会话
+
+### 使用方法
+
+```sh
+# stdio（默认，适用于 Claude Desktop 等 MCP 客户端）
+idalib-pool
+
+# stdio 并加载初始 binary
+idalib-pool /path/to/binary
+
+# HTTP/SSE 模式
+idalib-pool --transport http://127.0.0.1:8750
+
+# 多实例池
+idalib-pool --max-instances 3
+
+# 带认证
+idalib-pool --auth-token mysecret
+# 或：IDA_MCP_AUTH_TOKEN=mysecret idalib-pool
+```
+
+### 工作流示例
+
+```
+idalib_open("/firmware/httpd")        → 会话 "httpd-01"（默认）
+idalib_open("/firmware/libcrypto.so") → 会话 "crypto-01"
+
+# 显式路由——并行安全
+decompile("main", session_id="httpd-01")
+decompile("SSL_connect", session_id="crypto-01")
+
+# 或切换默认后省略 session_id
+idalib_switch("crypto-01")
+decompile("SSL_connect")  → 路由到 crypto-01
 ```
 
 ## 前置条件
 
 - [Python](https://www.python.org/downloads/) **3.11+**
-- [IDA Pro](https://hex-rays.com/ida-pro) **9.1+** 并安装 [idalib](https://docs.hex-rays.com/user-guide/idalib)（**不支持 IDA Free**）
-- 设置环境变量：
-  ```sh
-  export IDALIB_PATH=/path/to/ida/idalib
-  export IDAPRO_PATH=/path/to/ida
-  ```
+- [IDA Pro](https://hex-rays.com/ida-pro) **8.3+**（推荐 9.0+）并安装 [idalib](https://docs.hex-rays.com/user-guide/idalib) —— **不支持 IDA Free**
+- 设置 `IDADIR` 为 IDA 安装路径
 
 ## 安装
 
 ```sh
-pip install https://github.com/WinMin/ida-pro-mcp/archive/refs/heads/main.zip
+pip install https://github.com/zh-explorer/ida-pro-mcp/archive/refs/heads/dev.zip
 ```
 
-## 使用
-
-### 启动服务器
-
+或从源码：
 ```sh
-# stdio 传输（默认，大多数 MCP 客户端使用）
-idalib-session-mcp
-
-# SSE/HTTP 传输（远程/无头场景）
-idalib-session-mcp --transport http://127.0.0.1:8744/sse
+git clone https://github.com/zh-explorer/ida-pro-mcp
+cd ida-pro-mcp
+uv run idalib-pool
 ```
 
-### MCP 客户端配置
+## MCP 客户端配置
 
-**Claude Code / Claude Desktop (stdio)：**
+**Claude Code / Claude Desktop（stdio，推荐）：**
 ```json
 {
   "mcpServers": {
-    "idalib-session-mcp": {
-      "command": "idalib-session-mcp",
-      "args": []
+    "ida-pro-mcp": {
+      "command": "idalib-pool"
     }
   }
 }
 ```
 
-**Claude Code / Claude Desktop (SSE)：**
+**HTTP/SSE 模式：**
 ```json
 {
   "mcpServers": {
-    "idalib-session-mcp": {
-      "type": "sse",
-      "url": "http://127.0.0.1:8744/sse"
+    "ida-pro-mcp": {
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
 ```
 
-**从源码运行：**
+**从源码用 uv 运行：**
 ```json
 {
   "mcpServers": {
-    "idalib-session-mcp": {
+    "ida-pro-mcp": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/ida-pro-mcp", "idalib-session-mcp"]
+      "args": ["run", "--directory", "/path/to/ida-pro-mcp", "idalib-pool"]
     }
   }
 }
 ```
 
-## 会话工具
+## 会话管理工具
 
 | 工具 | 说明 |
 |------|------|
-| `session_open(binary_path)` | 打开一个新的分析会话 |
-| `session_list()` | 列出所有活跃会话 |
-| `session_switch(session_id)` | 切换当前活跃会话 |
-| `session_close(session_id)` | 关闭会话（保存 IDB） |
-| `session_info(session_id?)` | 获取会话详情（默认为当前活跃会话） |
-
-## 多 Agent `session_id` 路由
-
-所有 57 个 IDA 工具都注入了可选的 `session_id` 参数，支持多 Agent 并发操作不同二进制文件：
-
-```
-Agent A: decompile(addr="0x401000", session_id="abc123")  → 路由到 binary_a
-Agent B: decompile(addr="0x401000", session_id="def456")  → 路由到 binary_b
-```
-
-如果省略 `session_id`，调用将回退到当前活跃会话（由 `session_switch` 设置）。
+| `idalib_open(path, session_id?)` | 打开 binary，自动分配实例 |
+| `idalib_close(session_id)` | 关闭会话（保存 IDB） |
+| `idalib_switch(session_id)` | 设置默认会话（无 IDB 开销） |
+| `idalib_list()` | 列出所有会话 |
+| `idalib_current()` | 获取默认会话信息 |
+| `idalib_save(path?)` | 保存当前 IDB |
 
 ## IDA 工具
 
-完整继承 ida-pro-mcp 的 57 个工具。详细文档请参阅[上游仓库](https://github.com/mrexodia/ida-pro-mcp)，包括：
+继承上游 ida-pro-mcp 的 66 个工具，全部支持可选 `session_id` 路由。详细文档参阅[上游仓库](https://github.com/mrexodia/ida-pro-mcp)：
 
 - 反编译与反汇编（`decompile`、`disasm`）
 - 交叉引用与调用图（`xrefs_to`、`callees`、`callgraph`）
@@ -139,9 +166,9 @@ Agent B: decompile(addr="0x401000", session_id="def456")  → 路由到 binary_b
 - 类型操作（`declare_type`、`set_type`、`infer_types`、`read_struct`）
 - 重命名与注释（`rename`、`set_comments`）
 - 模式搜索（`find`、`find_bytes`、`find_regex`）
-- 调试器（`dbg_start`、`dbg_step_into` 等 —— 需要 `--unsafe` 参数）
+- Binary 概览（`survey_binary` —— 建议作为分析第一步）
 - Python 执行（`py_eval`）
 
 ## 致谢
 
-本项目 fork 自 [mrexodia/ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp)，核心 IDA MCP 工具的功劳归于 [@mrexodia](https://github.com/mrexodia) 及贡献者。
+Fork 自 [mrexodia/ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp)，由 [@mrexodia](https://github.com/mrexodia) 开发。多 binary 池代理由 [@zh-explorer](https://github.com/zh-explorer) 和 [@WinMin](https://github.com/WinMin) 合作开发。

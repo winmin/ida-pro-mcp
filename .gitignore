@@ -13,7 +13,7 @@ venv*/
 # Logs
 *.log
 
-# IDA database
+# Test files
 *.idb
 *.i64
 *.nam
@@ -21,11 +21,23 @@ venv*/
 *.id1
 *.id2
 *.til
+*.elf
+!tests/typed_fixture.elf
 
-# Generated server files (historical)
+# Generated server files
 server_generated.py
 
 # Coverage
-htmlcov/
 .coverage*
-coverage.xml
+htmlcov/
+scalene-profile.json
+.omp/
+
+# MCP config
+.mcp.json
+
+# IDE / editor
+.history/
+
+# Notes
+plan.md

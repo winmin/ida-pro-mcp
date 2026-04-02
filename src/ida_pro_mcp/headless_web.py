@@ -123,7 +123,7 @@ code, .mono { font-family: var(--mono); }
 .layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: 320px minmax(400px, 1fr) 330px;
+  grid-template-columns: 380px minmax(420px, 1fr) 300px;
 }
 .sidebar, .inspector, .editor {
   min-height: 0;
@@ -135,12 +135,14 @@ code, .mono { font-family: var(--mono); }
 .inspector { border-left: 1px solid var(--border); }
 .column {
   height: 100%;
-  overflow: auto;
-  padding: 12px;
+  overflow: hidden;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
+.sidebar .column { padding-right: 8px; }
+.inspector .column { overflow: auto; }
 .panel {
   border: 1px solid var(--border);
   background: #202124;
@@ -160,6 +162,14 @@ code, .mono { font-family: var(--mono); }
 .panel-title { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
 .panel-body { padding: 10px 12px; }
 .panel.fill { flex: 1; min-height: 0; }
+.panel.compact .panel-body { padding: 8px 10px; }
+.projects-panel .panel-body { max-height: 180px; overflow: auto; }
+.explorer-panel .panel-body { display: flex; flex-direction: column; gap: 10px; min-height: 0; height: 100%; }
+#resourceList { flex: 1; min-height: 0; overflow: auto; }
+.workspace-summary { display: flex; flex-wrap: wrap; gap: 8px; }
+.summary-chip { flex: 1 1 140px; min-width: 0; border: 1px solid var(--border); border-radius: 6px; background: #1b1c1f; padding: 8px 10px; }
+.summary-chip .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.summary-chip .value { margin-top: 4px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-grid {
   display: grid;
   grid-template-columns: 78px 1fr;
@@ -320,17 +330,17 @@ code, .mono { font-family: var(--mono); }
   <div class='layout'>
     <aside class='sidebar'>
       <div class='column'>
-        <section class='panel'>
+        <section class='panel compact workspace-panel'>
           <div class='panel-header'>
             <div class='panel-title'>Workspace</div>
             <span id='sessionBadge' class='badge warn'>No live session</span>
           </div>
           <div class='panel-body'>
-            <div id='workspaceMeta' class='meta-grid'></div>
+            <div id='workspaceMeta' class='workspace-summary'></div>
           </div>
         </section>
 
-        <section class='panel'>
+        <section class='panel projects-panel'>
           <div class='panel-header'>
             <div class='panel-title'>Projects</div>
             <button class='ghost' onclick='refreshWorkspace()'>Refresh</button>
@@ -340,12 +350,12 @@ code, .mono { font-family: var(--mono); }
           </div>
         </section>
 
-        <section class='panel fill'>
+        <section class='panel fill explorer-panel'>
           <div class='panel-header'>
             <div class='panel-title'>Explorer</div>
             <div id='indexBadges' class='row wrap'></div>
           </div>
-          <div class='panel-body' style='display:flex;flex-direction:column;gap:10px;min-height:0;height:100%;'>
+          <div class='panel-body'>
             <div class='segmented'>
               <button id='resource-functions' onclick="setResourceMode('functions')">Functions</button>
               <button id='resource-strings' onclick="setResourceMode('strings')">Strings</button>
@@ -353,7 +363,7 @@ code, .mono { font-family: var(--mono); }
               <button id='resource-history' onclick="setResourceMode('history')">History</button>
             </div>
             <input id='resourceFilter' placeholder='Filter current explorer' oninput='onResourceFilterChange()'>
-            <div id='resourceList' class='list' style='overflow:auto;min-height:260px;'></div>
+            <div id='resourceList' class='list'></div>
           </div>
         </section>
       </div>
@@ -553,16 +563,17 @@ function renderWorkspaceMeta() {
   const project = selectedProject();
   const binary = selectedBinary();
   const session = selectedSessionRecord();
-  const rows = [
+  const items = [
     ['Project', project ? project.name : '—'],
     ['Binary', binary ? binary.display_name : '—'],
-    ['Path', binary ? binary.binary_path : '—'],
-    ['IDB', binary?.idb_path || '—'],
     ['Session', state.selectedSessionId || '—'],
+    ['Path', binary ? (binary.idb_path || binary.binary_path) : '—'],
   ];
-  document.getElementById('workspaceMeta').innerHTML = rows.map(([label, value]) => `
-    <div class='label'>${escapeHtml(label)}</div>
-    <div class='value mono'>${escapeHtml(value)}</div>
+  document.getElementById('workspaceMeta').innerHTML = items.map(([label, value]) => `
+    <div class='summary-chip'>
+      <div class='label'>${escapeHtml(label)}</div>
+      <div class='value'>${escapeHtml(value)}</div>
+    </div>
   `).join('');
   document.getElementById('selectionPill').textContent = binary
     ? `${binary.display_name}${state.selectedSessionId ? ' · live' : ' · no session'}`

@@ -46,9 +46,12 @@
 - `GET /api/sessions/{id}/structs`
 - `POST /api/sessions/{id}/rename`
 - `POST /api/sessions/{id}/comment`
+- `POST /api/sessions/{id}/patch-bytes`
+- `POST /api/sessions/{id}/patch-asm`
+- `POST /api/sessions/{id}/set-type`
+- `POST /api/sessions/{id}/read-struct`
 
 ## Next milestones
 1. richer struct editing APIs
-2. decompile/disasm synchronized navigation model
-3. project import/export and session restore
-4. auth / RBAC / background job queue
+2. project import/export and session restore
+3. auth / RBAC / background job queue

@@ -36,6 +36,11 @@ pre { white-space: pre-wrap; word-break: break-word; background: #0b1220; paddin
 .tabs { display: flex; gap: 8px; margin: 12px 0; }
 .list { display: grid; gap: 8px; }
 .active { outline: 2px solid #38bdf8; }
+.split { display: grid; grid-template-columns: 340px 1fr; gap: 12px; }
+.pane { min-height: 420px; max-height: 60vh; overflow: auto; }
+.list-item { padding: 8px; border: 1px solid #334155; border-radius: 6px; margin-bottom: 8px; cursor: pointer; background: #0f172a; }
+.list-item:hover { background: #1e293b; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 </style>
 </head>
 <body>
@@ -93,13 +98,44 @@ pre { white-space: pre-wrap; word-break: break-word; background: #0b1220; paddin
         <button onclick="setComment()">Comment</button>
       </div>
     </div>
-    <pre id="output">Ready.</pre>
+    <div class="card">
+      <div class="row">
+        <input id="patchAddr" placeholder="patch addr">
+        <input id="patchBytesInput" placeholder="90 90 90 90">
+        <button onclick="patchBytesAction()">Patch Bytes</button>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <input id="asmAddr" placeholder="asm addr">
+        <input id="asmText" style="min-width:320px" placeholder="xor eax, eax">
+        <button onclick="patchAsm()">Patch ASM</button>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <input id="typeAddr" placeholder="type addr">
+        <input id="typeDecl" style="min-width:260px" placeholder="int / Point / int __fastcall foo(int)">
+        <input id="typeKind" placeholder="kind: global/function/local/stack">
+        <input id="typeName" placeholder="name / variable (optional)">
+        <button onclick="applyType()">Set Type</button>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <input id="readStructAddr" placeholder="read struct addr">
+        <input id="readStructName" placeholder="struct name (optional)">
+        <button onclick="readStructView()">Read Struct</button>
+      </div>
+    </div>
+    <div class="split">
+      <div class="card pane">
+        <div class="small" id="browserTitle">Browser</div>
+        <div id="browserList"></div>
+      </div>
+      <pre id="output" class="pane">Ready.</pre>
+    </div>
   </section>
 </main>
 <script>
 let selectedProjectId = null;
 let selectedBinaryId = null;
 let selectedSessionId = null;
+let currentBrowserMode = null;
 
 async function api(path, opts={}) {
   const res = await fetch(path, {headers: {'Content-Type':'application/json'}, ...opts});
@@ -143,6 +179,10 @@ async function refreshAll() {
   const data = await api('/api/projects');
   renderProjects(data);
   const sessions = await api('/api/sessions');
+  if (selectedBinaryId && !selectedSessionId) {
+    const firstForBinary = sessions.sessions.find(s => s.binary_id === selectedBinaryId);
+    if (firstForBinary) selectedSessionId = firstForBinary.runtime_session_id;
+  }
   const select = document.getElementById('sessionSelect');
   select.innerHTML = '<option value="">-- no session --</option>';
   for (const session of sessions.sessions) {
@@ -191,6 +231,29 @@ async function openSession() {
 
 function selectSession(id) { selectedSessionId = id || null; }
 
+function setAddrInputs(addr) {
+  document.getElementById('addrInput').value = addr || '';
+  document.getElementById('renameAddr').value = addr || '';
+  document.getElementById('commentAddr').value = addr || '';
+  document.getElementById('patchAddr').value = addr || '';
+  document.getElementById('asmAddr').value = addr || '';
+  document.getElementById('typeAddr').value = addr || '';
+  document.getElementById('readStructAddr').value = addr || '';
+}
+
+function renderBrowser(title, items, renderText, onClick) {
+  document.getElementById('browserTitle').textContent = title;
+  const root = document.getElementById('browserList');
+  root.innerHTML = '';
+  for (const item of items) {
+    const el = document.createElement('div');
+    el.className = 'list-item';
+    el.innerHTML = renderText(item);
+    el.onclick = () => onClick(item);
+    root.appendChild(el);
+  }
+}
+
 async function refreshIndexes() {
   if (!selectedBinaryId) throw new Error('Select a binary first');
   const data = await api(`/api/binaries/${selectedBinaryId}/refresh-indexes`, {method: 'POST'});
@@ -203,6 +266,16 @@ async function loadFunctions() {
   if (!selectedBinaryId) throw new Error('Select a binary first');
   const filter = encodeURIComponent(document.getElementById('structFilter').value || '');
   const data = await api(`/api/binaries/${selectedBinaryId}/functions?filter=${filter}`);
+  currentBrowserMode = 'functions';
+  renderBrowser(
+    `Functions (${data.functions.length})`,
+    data.functions,
+    item => `<div><strong>${item.name}</strong></div><div class="small mono">${item.addr} ${item.size || ''}</div>`,
+    async item => {
+      setAddrInputs(item.addr);
+      await loadDecompile();
+    }
+  );
   document.getElementById('output').textContent = JSON.stringify(data, null, 2);
 }
 
@@ -217,13 +290,24 @@ async function loadStrings() {
   if (!selectedBinaryId) throw new Error('Select a binary first');
   const q = encodeURIComponent(document.getElementById('structFilter').value || '');
   const data = await api(`/api/binaries/${selectedBinaryId}/strings?filter=${q}`);
+  currentBrowserMode = 'strings';
+  renderBrowser(
+    `Strings (${data.strings.length})`,
+    data.strings,
+    item => `<div class="mono">${item.addr}</div><div>${item.string || item.value || ''}</div>`,
+    item => {
+      setAddrInputs(item.addr);
+      document.getElementById('output').textContent = JSON.stringify(item, null, 2);
+    }
+  );
   document.getElementById('output').textContent = JSON.stringify(data, null, 2);
 }
 
 async function loadDecompile() {
   const addr = encodeURIComponent(document.getElementById('addrInput').value.trim());
   const data = await api(`/api/sessions/${selectedSessionId}/decompile?addr=${addr}`);
-  document.getElementById('output').textContent = typeof data.pseudocode === 'string' ? data.pseudocode : JSON.stringify(data, null, 2);
+  const body = data.result || data;
+  document.getElementById('output').textContent = typeof body.pseudocode === 'string' ? body.pseudocode : JSON.stringify(data, null, 2);
 }
 
 async function loadDisasm() {
@@ -236,6 +320,16 @@ async function loadStructs() {
   if (!selectedBinaryId) throw new Error('Select a binary first');
   const filter = encodeURIComponent(document.getElementById('structFilter').value || '');
   const data = await api(`/api/binaries/${selectedBinaryId}/structs?filter=${filter}`);
+  currentBrowserMode = 'structs';
+  renderBrowser(
+    `Structs (${data.structs.length})`,
+    data.structs,
+    item => `<div><strong>${item.name}</strong></div><div class="small mono">size=${item.size || '?'} ordinal=${item.ordinal ?? '?'}</div>`,
+    item => {
+      document.getElementById('readStructName').value = item.name || '';
+      document.getElementById('output').textContent = JSON.stringify(item, null, 2);
+    }
+  );
   document.getElementById('output').textContent = JSON.stringify(data, null, 2);
 }
 
@@ -251,6 +345,40 @@ async function setComment() {
   const comment = document.getElementById('commentText').value.trim();
   const data = await api(`/api/sessions/${selectedSessionId}/comment`, {method: 'POST', body: JSON.stringify({addr, comment})});
   document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+}
+
+async function patchBytesAction() {
+  if (!selectedSessionId) throw new Error('Select a session first');
+  const addr = document.getElementById('patchAddr').value.trim();
+  const data = document.getElementById('patchBytesInput').value.trim();
+  const res = await api(`/api/sessions/${selectedSessionId}/patch-bytes`, {method: 'POST', body: JSON.stringify({addr, data})});
+  document.getElementById('output').textContent = JSON.stringify(res, null, 2);
+}
+
+async function patchAsm() {
+  if (!selectedSessionId) throw new Error('Select a session first');
+  const addr = document.getElementById('asmAddr').value.trim();
+  const asm = document.getElementById('asmText').value.trim();
+  const res = await api(`/api/sessions/${selectedSessionId}/patch-asm`, {method: 'POST', body: JSON.stringify({addr, asm})});
+  document.getElementById('output').textContent = JSON.stringify(res, null, 2);
+}
+
+async function applyType() {
+  if (!selectedSessionId) throw new Error('Select a session first');
+  const addr = document.getElementById('typeAddr').value.trim();
+  const typeDecl = document.getElementById('typeDecl').value.trim();
+  const kind = document.getElementById('typeKind').value.trim();
+  const name = document.getElementById('typeName').value.trim();
+  const res = await api(`/api/sessions/${selectedSessionId}/set-type`, {method: 'POST', body: JSON.stringify({addr, type_decl: typeDecl, kind, name})});
+  document.getElementById('output').textContent = JSON.stringify(res, null, 2);
+}
+
+async function readStructView() {
+  if (!selectedSessionId) throw new Error('Select a session first');
+  const addr = document.getElementById('readStructAddr').value.trim();
+  const struct_name = document.getElementById('readStructName').value.trim();
+  const res = await api(`/api/sessions/${selectedSessionId}/read-struct`, {method: 'POST', body: JSON.stringify({addr, struct_name})});
+  document.getElementById('output').textContent = JSON.stringify(res, null, 2);
 }
 
 refreshAll().catch(err => document.getElementById('output').textContent = String(err));
@@ -356,6 +484,54 @@ class HeadlessWebBackend:
 
     def list_structs(self, runtime_session_id: str, struct_filter: str) -> dict[str, Any]:
         return self.session_tool(runtime_session_id, 'search_structs', {'filter': struct_filter or ''})
+
+    def patch_bytes(self, runtime_session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        addr = payload.get('addr')
+        data = payload.get('data')
+        if not addr or not data:
+            raise ValueError('addr and data are required')
+        return self.session_tool(runtime_session_id, 'patch', {'patches': {'addr': addr, 'data': data}})
+
+    def patch_asm(self, runtime_session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        addr = payload.get('addr')
+        asm = payload.get('asm')
+        if not addr or not asm:
+            raise ValueError('addr and asm are required')
+        return self.session_tool(runtime_session_id, 'patch_asm', {'items': {'addr': addr, 'asm': asm}})
+
+    def apply_type(self, runtime_session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        addr = payload.get('addr')
+        type_decl = payload.get('type_decl')
+        kind = (payload.get('kind') or '').strip()
+        name = (payload.get('name') or '').strip()
+        if not addr or not type_decl:
+            raise ValueError('addr and type_decl are required')
+
+        edit: dict[str, Any] = {'addr': addr}
+        if kind:
+            edit['kind'] = kind
+        if kind == 'function':
+            edit['signature'] = type_decl
+        else:
+            edit['ty'] = type_decl
+        if kind == 'global' and name:
+            edit['name'] = name
+        elif kind == 'local' and name:
+            edit['variable'] = name
+        elif kind == 'stack' and name:
+            edit['name'] = name
+
+        return self.session_tool(runtime_session_id, 'set_type', {'edits': edit})
+
+    def read_struct(self, runtime_session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        addr = payload.get('addr')
+        struct_name = (payload.get('struct_name') or '').strip()
+        if not addr:
+            raise ValueError('addr is required')
+        query: dict[str, Any] = {'addr': addr}
+        if struct_name:
+            query['struct'] = struct_name
+        return self.session_tool(runtime_session_id, 'read_struct', {'queries': query})
 
     def refresh_indexes(self, binary_id: str, runtime_session_id: str | None = None) -> dict[str, Any]:
         binary = self._require_binary(binary_id)
@@ -616,6 +792,22 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
             if path.startswith('/api/sessions/') and path.endswith('/comment'):
                 session_id = path.split('/')[3]
                 self._json(200, self.backend.comment(session_id, payload))
+                return
+            if path.startswith('/api/sessions/') and path.endswith('/patch-bytes'):
+                session_id = path.split('/')[3]
+                self._json(200, self.backend.patch_bytes(session_id, payload))
+                return
+            if path.startswith('/api/sessions/') and path.endswith('/patch-asm'):
+                session_id = path.split('/')[3]
+                self._json(200, self.backend.patch_asm(session_id, payload))
+                return
+            if path.startswith('/api/sessions/') and path.endswith('/set-type'):
+                session_id = path.split('/')[3]
+                self._json(200, self.backend.apply_type(session_id, payload))
+                return
+            if path.startswith('/api/sessions/') and path.endswith('/read-struct'):
+                session_id = path.split('/')[3]
+                self._json(200, self.backend.read_struct(session_id, payload))
                 return
             if path.startswith('/api/sessions/') and path.endswith('/tool'):
                 session_id = path.split('/')[3]

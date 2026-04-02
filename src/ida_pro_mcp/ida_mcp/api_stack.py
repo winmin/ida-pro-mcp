@@ -21,7 +21,7 @@ from .utils import (
     StackFrameVariable,
     get_stack_frame_variables_internal,
 )
-from .tests import (
+from .framework import (
     test,
     assert_has_keys,
     assert_is_list,

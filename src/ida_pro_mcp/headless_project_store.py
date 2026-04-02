@@ -120,6 +120,48 @@ class HeadlessProjectStore:
 
                 CREATE INDEX IF NOT EXISTS idx_sessions_binary_id ON sessions(binary_id);
                 CREATE INDEX IF NOT EXISTS idx_sessions_runtime_session_id ON sessions(runtime_session_id);
+
+                CREATE TABLE IF NOT EXISTS function_index (
+                    binary_id TEXT NOT NULL,
+                    addr TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    size TEXT,
+                    raw_json TEXT NOT NULL,
+                    refreshed_at TEXT NOT NULL,
+                    PRIMARY KEY(binary_id, addr),
+                    FOREIGN KEY(binary_id) REFERENCES binaries(binary_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS string_index (
+                    binary_id TEXT NOT NULL,
+                    addr TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    raw_json TEXT NOT NULL,
+                    refreshed_at TEXT NOT NULL,
+                    PRIMARY KEY(binary_id, addr, value),
+                    FOREIGN KEY(binary_id) REFERENCES binaries(binary_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS struct_index (
+                    binary_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    ordinal INTEGER,
+                    size INTEGER,
+                    cardinality INTEGER,
+                    is_union INTEGER,
+                    raw_json TEXT NOT NULL,
+                    refreshed_at TEXT NOT NULL,
+                    PRIMARY KEY(binary_id, name),
+                    FOREIGN KEY(binary_id) REFERENCES binaries(binary_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS binary_index_state (
+                    binary_id TEXT PRIMARY KEY,
+                    functions_refreshed_at TEXT,
+                    strings_refreshed_at TEXT,
+                    structs_refreshed_at TEXT,
+                    FOREIGN KEY(binary_id) REFERENCES binaries(binary_id) ON DELETE CASCADE
+                );
                 '''
             )
 
@@ -311,6 +353,29 @@ class HeadlessProjectStore:
             ).fetchall()
         return [self._row_to_session(row) for row in rows]
 
+    def list_sessions_for_binary(
+        self, binary_id: str, include_closed: bool = False
+    ) -> list[dict[str, Any]]:
+        where = "" if include_closed else "AND s.ended_at IS NULL"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f'''
+                SELECT s.*, b.display_name, b.binary_path, b.idb_path, p.name AS project_name
+                FROM sessions s
+                JOIN binaries b ON b.binary_id = s.binary_id
+                JOIN projects p ON p.project_id = s.project_id
+                WHERE s.binary_id = ?
+                {where}
+                ORDER BY s.created_at DESC
+                ''',
+                (binary_id,),
+            ).fetchall()
+        return [self._row_to_session(row) for row in rows]
+
+    def get_live_session_for_binary(self, binary_id: str) -> dict[str, Any] | None:
+        sessions = self.list_sessions_for_binary(binary_id, include_closed=False)
+        return sessions[0] if sessions else None
+
     def get_session(self, runtime_session_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -326,6 +391,172 @@ class HeadlessProjectStore:
                 (runtime_session_id,),
             ).fetchone()
         return self._row_to_session(row) if row else None
+
+    def replace_function_index(self, binary_id: str, items: list[dict[str, Any]]) -> None:
+        refreshed_at = utcnow_iso()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM function_index WHERE binary_id = ?", (binary_id,))
+            conn.executemany(
+                """
+                INSERT INTO function_index(binary_id, addr, name, size, raw_json, refreshed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        binary_id,
+                        str(item.get("addr", "")),
+                        str(item.get("name", "")),
+                        None if item.get("size") is None else str(item.get("size")),
+                        json.dumps(item),
+                        refreshed_at,
+                    )
+                    for item in items
+                ],
+            )
+            conn.execute(
+                """
+                INSERT INTO binary_index_state(binary_id, functions_refreshed_at)
+                VALUES (?, ?)
+                ON CONFLICT(binary_id) DO UPDATE SET functions_refreshed_at=excluded.functions_refreshed_at
+                """,
+                (binary_id, refreshed_at),
+            )
+
+    def replace_string_index(self, binary_id: str, items: list[dict[str, Any]]) -> None:
+        refreshed_at = utcnow_iso()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM string_index WHERE binary_id = ?", (binary_id,))
+            conn.executemany(
+                """
+                INSERT INTO string_index(binary_id, addr, value, raw_json, refreshed_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        binary_id,
+                        str(item.get("addr", "")),
+                        str(
+                            item.get("string")
+                            or item.get("value")
+                            or item.get("text")
+                            or ""
+                        ),
+                        json.dumps(item),
+                        refreshed_at,
+                    )
+                    for item in items
+                ],
+            )
+            conn.execute(
+                """
+                INSERT INTO binary_index_state(binary_id, strings_refreshed_at)
+                VALUES (?, ?)
+                ON CONFLICT(binary_id) DO UPDATE SET strings_refreshed_at=excluded.strings_refreshed_at
+                """,
+                (binary_id, refreshed_at),
+            )
+
+    def replace_struct_index(self, binary_id: str, items: list[dict[str, Any]]) -> None:
+        refreshed_at = utcnow_iso()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM struct_index WHERE binary_id = ?", (binary_id,))
+            conn.executemany(
+                """
+                INSERT INTO struct_index(
+                    binary_id, name, ordinal, size, cardinality, is_union, raw_json, refreshed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        binary_id,
+                        str(item.get("name", "")),
+                        item.get("ordinal"),
+                        item.get("size"),
+                        item.get("cardinality"),
+                        1 if item.get("is_union") else 0,
+                        json.dumps(item),
+                        refreshed_at,
+                    )
+                    for item in items
+                ],
+            )
+            conn.execute(
+                """
+                INSERT INTO binary_index_state(binary_id, structs_refreshed_at)
+                VALUES (?, ?)
+                ON CONFLICT(binary_id) DO UPDATE SET structs_refreshed_at=excluded.structs_refreshed_at
+                """,
+                (binary_id, refreshed_at),
+            )
+
+    def get_binary_index_state(self, binary_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM binary_index_state WHERE binary_id = ?", (binary_id,)
+            ).fetchone()
+        return (
+            {
+                "binary_id": row["binary_id"],
+                "functions_refreshed_at": row["functions_refreshed_at"],
+                "strings_refreshed_at": row["strings_refreshed_at"],
+                "structs_refreshed_at": row["structs_refreshed_at"],
+            }
+            if row
+            else {
+                "binary_id": binary_id,
+                "functions_refreshed_at": None,
+                "strings_refreshed_at": None,
+                "structs_refreshed_at": None,
+            }
+        )
+
+    def list_function_index(
+        self, binary_id: str, filter_text: str = "", limit: int = 200, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        pattern = f"%{filter_text.lower()}%"
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM function_index
+                WHERE binary_id = ? AND lower(name) LIKE ?
+                ORDER BY addr
+                LIMIT ? OFFSET ?
+                """,
+                (binary_id, pattern, limit, offset),
+            ).fetchall()
+        return [json.loads(row["raw_json"]) for row in rows]
+
+    def list_string_index(
+        self, binary_id: str, filter_text: str = "", limit: int = 200, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        pattern = f"%{filter_text.lower()}%"
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM string_index
+                WHERE binary_id = ? AND lower(value) LIKE ?
+                ORDER BY addr
+                LIMIT ? OFFSET ?
+                """,
+                (binary_id, pattern, limit, offset),
+            ).fetchall()
+        return [json.loads(row["raw_json"]) for row in rows]
+
+    def list_struct_index(
+        self, binary_id: str, filter_text: str = "", limit: int = 200, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        pattern = f"%{filter_text.lower()}%"
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM struct_index
+                WHERE binary_id = ? AND lower(name) LIKE ?
+                ORDER BY name
+                LIMIT ? OFFSET ?
+                """,
+                (binary_id, pattern, limit, offset),
+            ).fetchall()
+        return [json.loads(row["raw_json"]) for row in rows]
 
     def _row_to_binary(self, row: sqlite3.Row) -> dict[str, Any]:
         return {

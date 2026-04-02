@@ -41,7 +41,7 @@ pre { white-space: pre-wrap; word-break: break-word; background: #0b1220; paddin
 <body>
 <header>
   <strong>IDA Headless Manager</strong>
-  <span class="small">Project / Binary / Session / Strings / Decompile / Disasm / Structs</span>
+  <span class="small">Project / Binary / Session / Functions / Strings / Decompile / Disasm / Structs</span>
 </header>
 <main>
   <aside>
@@ -59,18 +59,22 @@ pre { white-space: pre-wrap; word-break: break-word; background: #0b1220; paddin
         <input id="binaryPath" style="min-width:320px" placeholder="/path/to/binary or .i64">
         <button onclick="addBinary()">Add Binary</button>
         <button onclick="openSession()">Start Session</button>
+        <button onclick="refreshIndexes()">Refresh Indexes</button>
         <button onclick="refreshAll()">Refresh</button>
       </div>
       <div class="small" id="selectionLabel">No binary selected</div>
+      <div class="small" id="indexStateLabel">No cache state</div>
     </div>
     <div class="card">
       <div class="row">
         <label>Session:</label>
         <select id="sessionSelect" onchange="selectSession(this.value)"></select>
         <input id="addrInput" placeholder="0x401000 / function addr">
-        <input id="structFilter" placeholder="struct filter / string regex">
+        <input id="structFilter" placeholder="filter / string regex / function name">
       </div>
       <div class="tabs">
+        <button onclick="loadFunctions()">Functions</button>
+        <button onclick="lookupAddress()">Lookup</button>
         <button onclick="loadStrings()">Strings</button>
         <button onclick="loadDecompile()">Decompile</button>
         <button onclick="loadDisasm()">Disasm</button>
@@ -150,6 +154,15 @@ async function refreshAll() {
   }
   const label = document.getElementById('selectionLabel');
   label.textContent = selectedBinaryId ? `Selected binary: ${selectedBinaryId}` : 'No binary selected';
+  const indexLabel = document.getElementById('indexStateLabel');
+  if (selectedBinaryId) {
+    const indexes = await api(`/api/binaries/${selectedBinaryId}/indexes`);
+    const st = indexes.index_state;
+    indexLabel.textContent =
+      `indexes => funcs: ${st.functions_refreshed_at || '-'} | strings: ${st.strings_refreshed_at || '-'} | structs: ${st.structs_refreshed_at || '-'}`;
+  } else {
+    indexLabel.textContent = 'No cache state';
+  }
 }
 
 async function createProject() {
@@ -178,9 +191,32 @@ async function openSession() {
 
 function selectSession(id) { selectedSessionId = id || null; }
 
+async function refreshIndexes() {
+  if (!selectedBinaryId) throw new Error('Select a binary first');
+  const data = await api(`/api/binaries/${selectedBinaryId}/refresh-indexes`, {method: 'POST'});
+  if (data.session_id && !selectedSessionId) selectedSessionId = data.session_id;
+  await refreshAll();
+  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+}
+
+async function loadFunctions() {
+  if (!selectedBinaryId) throw new Error('Select a binary first');
+  const filter = encodeURIComponent(document.getElementById('structFilter').value || '');
+  const data = await api(`/api/binaries/${selectedBinaryId}/functions?filter=${filter}`);
+  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+}
+
+async function lookupAddress() {
+  if (!selectedSessionId) throw new Error('Select a session first');
+  const addr = encodeURIComponent(document.getElementById('addrInput').value.trim());
+  const data = await api(`/api/sessions/${selectedSessionId}/lookup?query=${addr}`);
+  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+}
+
 async function loadStrings() {
-  const q = encodeURIComponent(document.getElementById('structFilter').value || '.');
-  const data = await api(`/api/sessions/${selectedSessionId}/strings?q=${q}`);
+  if (!selectedBinaryId) throw new Error('Select a binary first');
+  const q = encodeURIComponent(document.getElementById('structFilter').value || '');
+  const data = await api(`/api/binaries/${selectedBinaryId}/strings?filter=${q}`);
   document.getElementById('output').textContent = JSON.stringify(data, null, 2);
 }
 
@@ -197,8 +233,9 @@ async function loadDisasm() {
 }
 
 async function loadStructs() {
+  if (!selectedBinaryId) throw new Error('Select a binary first');
   const filter = encodeURIComponent(document.getElementById('structFilter').value || '');
-  const data = await api(`/api/sessions/${selectedSessionId}/structs?filter=${filter}`);
+  const data = await api(`/api/binaries/${selectedBinaryId}/structs?filter=${filter}`);
   document.getElementById('output').textContent = JSON.stringify(data, null, 2);
 }
 
@@ -237,6 +274,20 @@ class HeadlessWebBackend:
             project['binaries'] = self.store.list_binaries(project['project_id'])
         return {'projects': projects}
 
+    def _require_binary(self, binary_id: str) -> dict[str, Any]:
+        binary = self.store.get_binary(binary_id)
+        if binary is None:
+            raise KeyError(f'binary not found: {binary_id}')
+        return binary
+
+    def _require_live_session_for_binary(self, binary_id: str) -> dict[str, Any]:
+        session = self.store.get_live_session_for_binary(binary_id)
+        if session is None:
+            raise RuntimeError(
+                f'no live session for binary {binary_id}; start a session first'
+            )
+        return session
+
     def create_project(self, payload: dict[str, Any]) -> dict[str, Any]:
         name = (payload.get('name') or '').strip()
         if not name:
@@ -251,9 +302,7 @@ class HeadlessWebBackend:
         return {'binary': self.store.add_binary(project_id, binary_path, payload.get('display_name'))}
 
     def open_session(self, binary_id: str) -> dict[str, Any]:
-        binary = self.store.get_binary(binary_id)
-        if binary is None:
-            raise KeyError(f'binary not found: {binary_id}')
+        binary = self._require_binary(binary_id)
         session = self.sessions.create_session(binary['binary_path'])
         self.store.record_session_open(
             project_id=binary['project_id'],
@@ -290,6 +339,11 @@ class HeadlessWebBackend:
     def list_strings(self, runtime_session_id: str, query: str, offset: int = 0, limit: int = 100) -> dict[str, Any]:
         return self.session_tool(runtime_session_id, 'find_regex', {'pattern': query or '.', 'offset': offset, 'limit': limit})
 
+    def lookup(self, runtime_session_id: str, query: str) -> dict[str, Any]:
+        if not query:
+            raise ValueError('query is required')
+        return self.session_tool(runtime_session_id, 'lookup_funcs', {'queries': query})
+
     def decompile(self, runtime_session_id: str, addr: str) -> dict[str, Any]:
         if not addr:
             raise ValueError('addr is required')
@@ -302,6 +356,108 @@ class HeadlessWebBackend:
 
     def list_structs(self, runtime_session_id: str, struct_filter: str) -> dict[str, Any]:
         return self.session_tool(runtime_session_id, 'search_structs', {'filter': struct_filter or ''})
+
+    def refresh_indexes(self, binary_id: str, runtime_session_id: str | None = None) -> dict[str, Any]:
+        binary = self._require_binary(binary_id)
+        session = (
+            self.store.get_session(runtime_session_id)
+            if runtime_session_id
+            else self.store.get_live_session_for_binary(binary_id)
+        )
+        if session is None:
+            opened = self.open_session(binary_id)
+            session = opened['session']
+
+        sid = session['runtime_session_id']
+
+        functions: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            page_result = self.sessions.call_tool(
+                'list_funcs',
+                {'queries': {'filter': '*', 'offset': offset, 'count': 500}},
+                session_id=sid,
+            )
+            page = page_result[0] if isinstance(page_result, list) else page_result
+            batch = page.get('data', [])
+            functions.extend(batch)
+            if page.get('next_offset') is None:
+                break
+            offset = int(page['next_offset'])
+        self.store.replace_function_index(binary_id, functions)
+
+        strings: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            string_result = self.sessions.call_tool(
+                'find_regex',
+                {'pattern': '.*', 'offset': offset, 'limit': 500},
+                session_id=sid,
+            )
+            batch = string_result.get('matches', [])
+            strings.extend(batch)
+            cursor = string_result.get('cursor', {})
+            if 'next' not in cursor:
+                break
+            offset = int(cursor['next'])
+        self.store.replace_string_index(binary_id, strings)
+
+        structs = self.sessions.call_tool(
+            'search_structs',
+            {'filter': ''},
+            session_id=sid,
+        )
+        self.store.replace_struct_index(binary_id, structs if isinstance(structs, list) else [])
+
+        self.store.update_binary_idb_path(
+            binary_id,
+            binary.get('idb_path') or Path(binary['binary_path']).with_suffix('.i64'),
+        )
+
+        return {
+            'binary_id': binary_id,
+            'session_id': sid,
+            'counts': {
+                'functions': len(functions),
+                'strings': len(strings),
+                'structs': len(structs) if isinstance(structs, list) else 0,
+            },
+            'index_state': self.store.get_binary_index_state(binary_id),
+        }
+
+    def get_binary_indexes(self, binary_id: str) -> dict[str, Any]:
+        binary = self._require_binary(binary_id)
+        return {
+            'binary': binary,
+            'index_state': self.store.get_binary_index_state(binary_id),
+        }
+
+    def cached_functions(
+        self, binary_id: str, filter_text: str = '', limit: int = 200, offset: int = 0
+    ) -> dict[str, Any]:
+        return {
+            'binary_id': binary_id,
+            'index_state': self.store.get_binary_index_state(binary_id),
+            'functions': self.store.list_function_index(binary_id, filter_text, limit, offset),
+        }
+
+    def cached_strings(
+        self, binary_id: str, filter_text: str = '', limit: int = 200, offset: int = 0
+    ) -> dict[str, Any]:
+        return {
+            'binary_id': binary_id,
+            'index_state': self.store.get_binary_index_state(binary_id),
+            'strings': self.store.list_string_index(binary_id, filter_text, limit, offset),
+        }
+
+    def cached_structs(
+        self, binary_id: str, filter_text: str = '', limit: int = 200, offset: int = 0
+    ) -> dict[str, Any]:
+        return {
+            'binary_id': binary_id,
+            'index_state': self.store.get_binary_index_state(binary_id),
+            'structs': self.store.list_struct_index(binary_id, filter_text, limit, offset),
+        }
 
     def rename(self, runtime_session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         addr = payload.get('addr')
@@ -361,6 +517,50 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
             if path == '/api/sessions':
                 self._json(200, self.backend.list_sessions())
                 return
+            if path.startswith('/api/binaries/') and path.endswith('/indexes'):
+                binary_id = path.split('/')[3]
+                self._json(200, self.backend.get_binary_indexes(binary_id))
+                return
+            if path.startswith('/api/binaries/') and path.endswith('/functions'):
+                binary_id = path.split('/')[3]
+                self._json(
+                    200,
+                    self.backend.cached_functions(
+                        binary_id,
+                        query.get('filter', [''])[0],
+                        int(query.get('limit', ['200'])[0]),
+                        int(query.get('offset', ['0'])[0]),
+                    ),
+                )
+                return
+            if path.startswith('/api/binaries/') and path.endswith('/strings'):
+                binary_id = path.split('/')[3]
+                self._json(
+                    200,
+                    self.backend.cached_strings(
+                        binary_id,
+                        query.get('filter', [''])[0],
+                        int(query.get('limit', ['200'])[0]),
+                        int(query.get('offset', ['0'])[0]),
+                    ),
+                )
+                return
+            if path.startswith('/api/binaries/') and path.endswith('/structs'):
+                binary_id = path.split('/')[3]
+                self._json(
+                    200,
+                    self.backend.cached_structs(
+                        binary_id,
+                        query.get('filter', [''])[0],
+                        int(query.get('limit', ['200'])[0]),
+                        int(query.get('offset', ['0'])[0]),
+                    ),
+                )
+                return
+            if path.startswith('/api/sessions/') and path.endswith('/lookup'):
+                session_id = path.split('/')[3]
+                self._json(200, self.backend.lookup(session_id, query.get('query', [''])[0]))
+                return
             if path.startswith('/api/sessions/') and path.endswith('/strings'):
                 session_id = path.split('/')[3]
                 self._json(200, self.backend.list_strings(session_id, query.get('q', ['.'])[0], int(query.get('offset', ['0'])[0]), int(query.get('limit', ['100'])[0])))
@@ -397,6 +597,13 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
             if path.startswith('/api/binaries/') and path.endswith('/sessions'):
                 binary_id = path.split('/')[3]
                 self._json(200, self.backend.open_session(binary_id))
+                return
+            if path.startswith('/api/binaries/') and path.endswith('/refresh-indexes'):
+                binary_id = path.split('/')[3]
+                self._json(
+                    200,
+                    self.backend.refresh_indexes(binary_id, payload.get('session_id')),
+                )
                 return
             if path.startswith('/api/sessions/') and path.endswith('/close'):
                 session_id = path.split('/')[3]

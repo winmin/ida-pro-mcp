@@ -34,6 +34,12 @@
 - `POST /api/projects/{project_id}/binaries`
 - `GET /api/sessions`
 - `POST /api/binaries/{binary_id}/sessions`
+- `POST /api/binaries/{binary_id}/refresh-indexes`
+- `GET /api/binaries/{binary_id}/indexes`
+- `GET /api/binaries/{binary_id}/functions`
+- `GET /api/binaries/{binary_id}/strings`
+- `GET /api/binaries/{binary_id}/structs`
+- `GET /api/sessions/{id}/lookup`
 - `GET /api/sessions/{id}/strings`
 - `GET /api/sessions/{id}/decompile`
 - `GET /api/sessions/{id}/disasm`
@@ -42,8 +48,7 @@
 - `POST /api/sessions/{id}/comment`
 
 ## Next milestones
-1. materialized index refresh jobs per binary
-2. richer struct editing APIs
-3. decompile/disasm synchronized navigation model
-4. project import/export and session restore
-5. auth / RBAC / background job queue
+1. richer struct editing APIs
+2. decompile/disasm synchronized navigation model
+3. project import/export and session restore
+4. auth / RBAC / background job queue

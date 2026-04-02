@@ -14,421 +14,1209 @@ from ida_pro_mcp.session_mcp_server import SessionMcpServer
 
 logger = logging.getLogger(__name__)
 
-INDEX_HTML = '''<!doctype html>
-<html lang="en">
+INDEX_HTML = """<!doctype html>
+<html lang='en'>
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>IDA Headless Manager</title>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>IDA Workspace</title>
 <style>
-body { margin: 0; font-family: system-ui, sans-serif; background: #111827; color: #e5e7eb; }
-header { padding: 12px 16px; border-bottom: 1px solid #374151; display: flex; gap: 12px; align-items: center; }
-main { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 58px); }
-aside { border-right: 1px solid #374151; overflow: auto; padding: 12px; }
-section { padding: 12px; overflow: auto; }
-.card { background: #1f2937; border: 1px solid #374151; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
-button,input,textarea,select { background: #0f172a; color: #e5e7eb; border: 1px solid #475569; border-radius: 6px; padding: 8px; }
-button { cursor: pointer; }
-button:hover { background: #1e293b; }
-pre { white-space: pre-wrap; word-break: break-word; background: #0b1220; padding: 12px; border-radius: 8px; }
-.small { color: #94a3b8; font-size: 12px; }
-.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.tabs { display: flex; gap: 8px; margin: 12px 0; }
-.list { display: grid; gap: 8px; }
-.active { outline: 2px solid #38bdf8; }
-.split { display: grid; grid-template-columns: 340px 1fr; gap: 12px; }
-.pane { min-height: 420px; max-height: 60vh; overflow: auto; }
-.list-item { padding: 8px; border: 1px solid #334155; border-radius: 6px; margin-bottom: 8px; cursor: pointer; background: #0f172a; }
-.list-item:hover { background: #1e293b; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+:root {
+  --bg: #1e1e1e;
+  --panel: #252526;
+  --panel-2: #2d2d30;
+  --border: #3c3c3c;
+  --text: #d4d4d4;
+  --muted: #9da5b4;
+  --accent: #0e639c;
+  --accent-2: #3794ff;
+  --danger: #c74e39;
+  --success: #2ea043;
+  --selection: #37373d;
+  --shadow: rgba(0, 0, 0, 0.28);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+button, input, textarea {
+  font: inherit;
+}
+button {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+button:hover { border-color: #5a5a5a; }
+button.primary { background: var(--accent); border-color: #1177bb; }
+button.primary:hover { background: #1177bb; }
+button.ghost { background: transparent; }
+button.active { background: var(--accent); border-color: var(--accent-2); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+input, textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: #1f1f1f;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+textarea { min-height: 88px; resize: vertical; }
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+code, .mono { font-family: var(--mono); }
+.small { font-size: 12px; color: var(--muted); }
+.app {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 44px 56px 1fr 24px;
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: #181818;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+}
+.brand small { color: var(--muted); font-weight: 500; }
+.pill {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: var(--panel);
+  color: var(--muted);
+}
+.commandbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(360px, 1.4fr) minmax(360px, 1fr);
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: #202020;
+}
+.group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.layout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 320px minmax(400px, 1fr) 330px;
+}
+.sidebar, .inspector, .editor {
+  min-height: 0;
+}
+.sidebar, .inspector {
+  background: var(--panel);
+}
+.sidebar { border-right: 1px solid var(--border); }
+.inspector { border-left: 1px solid var(--border); }
+.column {
+  height: 100%;
+  overflow: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.panel {
+  border: 1px solid var(--border);
+  background: #202124;
+  border-radius: 8px;
+  box-shadow: 0 10px 24px -16px var(--shadow);
+  overflow: hidden;
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: #26272b;
+}
+.panel-title { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.panel-body { padding: 10px 12px; }
+.panel.fill { flex: 1; min-height: 0; }
+.meta-grid {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 8px 10px;
+  align-items: start;
+}
+.meta-grid .label { color: var(--muted); }
+.meta-grid .value { word-break: break-word; }
+.tree, .list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tree-project, .tree-binary, .list-item, .history-item, .xref-item, .table-row {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.tree-project, .tree-binary, .list-item, .table-row, .xref-item { cursor: pointer; }
+.tree-project:hover, .tree-binary:hover, .list-item:hover, .table-row:hover, .xref-item:hover { background: #2b2d31; }
+.tree-project.active, .tree-binary.active, .list-item.active, .table-row.active, .xref-item.active { background: var(--selection); border-color: #52525b; }
+.tree-binaries { margin: 6px 0 0 14px; display: flex; flex-direction: column; gap: 6px; }
+.row { display: flex; align-items: center; gap: 8px; }
+.row.wrap { flex-wrap: wrap; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  background: #1a1a1a;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+.badge.success { color: #9be9a8; border-color: rgba(46,160,67,.55); }
+.badge.warn { color: #f2cc60; }
+.segmented { display: flex; gap: 6px; flex-wrap: wrap; }
+.segmented button { flex: 1; min-width: 0; }
+.editor {
+  min-width: 0;
+  background: #1f1f1f;
+  display: grid;
+  grid-template-rows: 42px 1fr;
+}
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #252526;
+}
+.tab {
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  padding: 8px 12px;
+  color: var(--muted);
+}
+.tab.active {
+  background: #1e1e1e;
+  color: var(--text);
+  border-color: var(--border);
+}
+.views { min-height: 0; position: relative; }
+.view {
+  display: none;
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  padding: 14px;
+}
+.view.active { display: block; }
+.code-view {
+  border: 1px solid var(--border);
+  background: #1a1a1a;
+  border-radius: 8px;
+  padding: 14px;
+  min-height: 100%;
+}
+.table {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.table-header, .table-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 12px;
+  align-items: start;
+}
+.table-header {
+  padding: 10px 12px;
+  background: #252526;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: .05em;
+}
+.table-row { border-top: 1px solid #2b2b2b; }
+.empty {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 18px;
+  color: var(--muted);
+  background: rgba(255,255,255,0.015);
+}
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+  background: #007acc;
+  color: white;
+  font-size: 12px;
+}
+.statusbar .muted { opacity: 0.9; }
+.linkish { color: #4fc1ff; cursor: pointer; }
+@media (max-width: 1280px) {
+  .commandbar { grid-template-columns: 1fr; }
+  .layout { grid-template-columns: 280px 1fr; }
+  .inspector { display: none; }
+}
 </style>
 </head>
 <body>
-<header>
-  <strong>IDA Headless Manager</strong>
-  <span class="small">Project / Binary / Session / Functions / Strings / Decompile / Disasm / Structs</span>
-</header>
-<main>
-  <aside>
-    <div class="card">
-      <div class="row">
-        <input id="projectName" placeholder="New project name">
-        <button onclick="createProject()">Create</button>
-      </div>
+<div class='app'>
+  <header class='topbar'>
+    <div class='brand'>
+      <span>IDA Workspace</span>
+      <small>headless · upstream ida tools</small>
     </div>
-    <div id="projects" class="list"></div>
-  </aside>
-  <section>
-    <div class="card">
-      <div class="row">
-        <input id="binaryPath" style="min-width:320px" placeholder="/path/to/binary or .i64">
-        <button onclick="addBinary()">Add Binary</button>
-        <button onclick="restoreArtifact()">Restore Artifact</button>
-        <button onclick="openSession()">Start Session</button>
-        <button onclick="refreshIndexes()">Refresh Indexes</button>
-        <button onclick="loadHistory()">History</button>
-        <button onclick="refreshAll()">Refresh</button>
-      </div>
-      <div class="small" id="selectionLabel">No binary selected</div>
-      <div class="small" id="indexStateLabel">No cache state</div>
+    <div id='selectionPill' class='pill'>No binary selected</div>
+  </header>
+
+  <div class='commandbar'>
+    <div class='group'>
+      <input id='projectName' placeholder='New project name'>
+      <button class='primary' onclick='createProject()'>Create Project</button>
     </div>
-    <div class="card">
-      <div class="row">
-        <label>Session:</label>
-        <select id="sessionSelect" onchange="selectSession(this.value)"></select>
-        <input id="addrInput" placeholder="0x401000 / function addr">
-        <input id="structFilter" placeholder="filter / string regex / function name">
-      </div>
-      <div class="tabs">
-        <button onclick="loadFunctions()">Functions</button>
-        <button onclick="lookupAddress()">Lookup</button>
-        <button onclick="loadStrings()">Strings</button>
-        <button onclick="loadDecompile()">Decompile</button>
-        <button onclick="loadDisasm()">Disasm</button>
-        <button onclick="loadStructs()">Structs</button>
-      </div>
+    <div class='group'>
+      <input id='artifactPath' placeholder='/path/to/binary or .i64'>
+      <button onclick='addBinary()'>Add Binary</button>
+      <button onclick='restoreArtifact()'>Restore</button>
     </div>
-    <div class="card">
-      <div class="row">
-        <input id="renameAddr" placeholder="rename addr">
-        <input id="renameNew" placeholder="new name">
-        <button onclick="renameSymbol()">Rename</button>
-      </div>
-      <div class="row" style="margin-top:8px;">
-        <input id="commentAddr" placeholder="comment addr">
-        <input id="commentText" style="min-width:320px" placeholder="comment text">
-        <button onclick="setComment()">Comment</button>
-      </div>
+    <div class='group'>
+      <button id='startSessionBtn' onclick='openSession()'>Start Session</button>
+      <button id='refreshIndexesBtn' onclick='refreshIndexes()'>Refresh Indexes</button>
+      <input id='gotoInput' placeholder='Address or symbol'>
+      <button onclick='lookupAndOpen()'>Go</button>
     </div>
-    <div class="card">
-      <div class="row">
-        <input id="patchAddr" placeholder="patch addr">
-        <input id="patchBytesInput" placeholder="90 90 90 90">
-        <button onclick="patchBytesAction()">Patch Bytes</button>
+  </div>
+
+  <div class='layout'>
+    <aside class='sidebar'>
+      <div class='column'>
+        <section class='panel'>
+          <div class='panel-header'>
+            <div class='panel-title'>Workspace</div>
+            <span id='sessionBadge' class='badge warn'>No live session</span>
+          </div>
+          <div class='panel-body'>
+            <div id='workspaceMeta' class='meta-grid'></div>
+          </div>
+        </section>
+
+        <section class='panel'>
+          <div class='panel-header'>
+            <div class='panel-title'>Projects</div>
+            <button class='ghost' onclick='refreshWorkspace()'>Refresh</button>
+          </div>
+          <div class='panel-body'>
+            <div id='projectTree' class='tree'></div>
+          </div>
+        </section>
+
+        <section class='panel fill'>
+          <div class='panel-header'>
+            <div class='panel-title'>Explorer</div>
+            <div id='indexBadges' class='row wrap'></div>
+          </div>
+          <div class='panel-body' style='display:flex;flex-direction:column;gap:10px;min-height:0;height:100%;'>
+            <div class='segmented'>
+              <button id='resource-functions' onclick="setResourceMode('functions')">Functions</button>
+              <button id='resource-strings' onclick="setResourceMode('strings')">Strings</button>
+              <button id='resource-structs' onclick="setResourceMode('structs')">Structs</button>
+              <button id='resource-history' onclick="setResourceMode('history')">History</button>
+            </div>
+            <input id='resourceFilter' placeholder='Filter current explorer' oninput='onResourceFilterChange()'>
+            <div id='resourceList' class='list' style='overflow:auto;min-height:260px;'></div>
+          </div>
+        </section>
       </div>
-      <div class="row" style="margin-top:8px;">
-        <input id="asmAddr" placeholder="asm addr">
-        <input id="asmText" style="min-width:320px" placeholder="xor eax, eax">
-        <button onclick="patchAsm()">Patch ASM</button>
+    </aside>
+
+    <main class='editor'>
+      <div class='tabs'>
+        <button id='tab-decompile' class='tab' onclick="setTab('decompile')">Decompiler</button>
+        <button id='tab-disasm' class='tab' onclick="setTab('disasm')">Disassembly</button>
+        <button id='tab-strings' class='tab' onclick="setTab('strings')">Strings</button>
+        <button id='tab-structs' class='tab' onclick="setTab('structs')">Structs</button>
+        <button id='tab-history' class='tab' onclick="setTab('history')">History</button>
       </div>
-      <div class="row" style="margin-top:8px;">
-        <input id="typeAddr" placeholder="type addr">
-        <input id="typeDecl" style="min-width:260px" placeholder="int / Point / int __fastcall foo(int)">
-        <input id="typeKind" placeholder="kind: global/function/local/stack">
-        <input id="typeName" placeholder="name / variable (optional)">
-        <button onclick="applyType()">Set Type</button>
+      <div class='views'>
+        <section id='view-decompile' class='view'>
+          <div class='code-view'><pre id='decompileOutput'>Select a function or use Go to load pseudocode.</pre></div>
+        </section>
+        <section id='view-disasm' class='view'>
+          <div class='code-view'><pre id='disasmOutput'>Select a function or use Go to load disassembly.</pre></div>
+        </section>
+        <section id='view-strings' class='view'>
+          <div id='stringsTable'></div>
+        </section>
+        <section id='view-structs' class='view'>
+          <div id='structsTable'></div>
+        </section>
+        <section id='view-history' class='view'>
+          <div id='historyTable'></div>
+        </section>
       </div>
-      <div class="row" style="margin-top:8px;">
-        <input id="readStructAddr" placeholder="read struct addr">
-        <input id="readStructName" placeholder="struct name (optional)">
-        <button onclick="readStructView()">Read Struct</button>
+    </main>
+
+    <aside class='inspector'>
+      <div class='column'>
+        <section class='panel'>
+          <div class='panel-header'><div class='panel-title'>Inspector</div></div>
+          <div class='panel-body'>
+            <div id='inspectorSummary' class='meta-grid'></div>
+          </div>
+        </section>
+
+        <section class='panel'>
+          <div class='panel-header'>
+            <div class='panel-title'>Xrefs</div>
+            <button class='ghost' onclick='refreshInspectorXrefs()'>Refresh</button>
+          </div>
+          <div class='panel-body'>
+            <div id='xrefsList' class='list'></div>
+          </div>
+        </section>
+
+        <section class='panel'>
+          <div class='panel-header'><div class='panel-title'>Actions</div></div>
+          <div class='panel-body' style='display:flex;flex-direction:column;gap:10px;'>
+            <div>
+              <div class='small' style='margin-bottom:4px;'>Rename selected address</div>
+              <div class='row'>
+                <input id='renameInput' placeholder='new_symbol_name'>
+                <button onclick='renameSelected()'>Save</button>
+              </div>
+            </div>
+            <div>
+              <div class='small' style='margin-bottom:4px;'>Comment selected address</div>
+              <textarea id='commentInput' placeholder='Comment text'></textarea>
+              <div class='row' style='margin-top:8px;'>
+                <button onclick='commentSelected()'>Save Comment</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class='panel fill'>
+          <div class='panel-header'><div class='panel-title'>Details</div></div>
+          <div class='panel-body' style='min-height:280px;'>
+            <pre id='detailsOutput'>No selection.</pre>
+          </div>
+        </section>
       </div>
-      <div class="row" style="margin-top:8px;">
-        <input id="structDeclName" placeholder="struct name">
-        <button onclick="declareStruct()">Declare/Update Struct</button>
-      </div>
-      <div class="row" style="margin-top:8px;">
-        <textarea id="structDeclBody" style="width:100%;min-height:120px" placeholder="int field1;&#10;char field2;&#10;void *field3;"></textarea>
-      </div>
-    </div>
-    <div class="split">
-      <div class="card pane">
-        <div class="small" id="browserTitle">Browser</div>
-        <div id="browserList"></div>
-      </div>
-      <pre id="output" class="pane">Ready.</pre>
-    </div>
-  </section>
-</main>
+    </aside>
+  </div>
+
+  <footer class='statusbar'>
+    <span id='statusText'>Ready.</span>
+    <span id='statusMeta' class='muted'></span>
+  </footer>
+</div>
+
 <script>
-let selectedProjectId = null;
-let selectedBinaryId = null;
-let selectedSessionId = null;
-let currentBrowserMode = null;
+const state = {
+  projects: [],
+  sessions: [],
+  selectedProjectId: null,
+  selectedBinaryId: null,
+  selectedSessionId: null,
+  resourceMode: 'functions',
+  activeTab: 'decompile',
+  selectedItem: null,
+  currentIndexState: null,
+  currentResourceItems: [],
+  loading: false,
+};
 
-async function api(path, opts={}) {
-  const res = await fetch(path, {headers: {'Content-Type':'application/json'}, ...opts});
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || JSON.stringify(data));
-  return data;
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-function renderProjects(data) {
-  const root = document.getElementById('projects');
-  root.innerHTML = '';
-  for (const project of data.projects) {
-    const el = document.createElement('div');
-    el.className = 'card' + (project.project_id === selectedProjectId ? ' active' : '');
-    el.innerHTML = `<div class="row"><strong>${project.name}</strong><span class="small">${project.binary_count} bins / ${project.live_session_count} live</span></div>`;
-    el.onclick = async () => {
-      selectedProjectId = project.project_id;
-      selectedBinaryId = null;
-      await refreshAll();
-    };
-    root.appendChild(el);
-    if (project.binaries) {
-      for (const binary of project.binaries) {
-        const child = document.createElement('div');
-        child.className = 'card' + (binary.binary_id === selectedBinaryId ? ' active' : '');
-        child.style.marginLeft = '12px';
-        child.innerHTML = `<div>${binary.display_name}</div><div class="small">${binary.binary_path}</div>`;
-        child.onclick = async (ev) => {
-          ev.stopPropagation();
-          selectedProjectId = project.project_id;
-          selectedBinaryId = binary.binary_id;
-          await refreshAll();
-        };
-        root.appendChild(child);
-      }
-    }
+function setStatus(message, meta = '', isError = false) {
+  const text = document.getElementById('statusText');
+  const metaEl = document.getElementById('statusMeta');
+  text.textContent = message;
+  metaEl.textContent = meta || '';
+  document.querySelector('.statusbar').style.background = isError ? '#a1260d' : '#007acc';
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    headers: {'Content-Type': 'application/json'},
+    ...options,
+  });
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch (err) {
+    payload = {error: text};
+  }
+  if (!response.ok) {
+    throw new Error(payload.error || `${response.status} ${response.statusText}`);
+  }
+  return payload;
+}
+
+function unwrapResult(value) {
+  let current = value;
+  while (current && typeof current === 'object' && !Array.isArray(current) && Object.keys(current).length === 1 && Object.prototype.hasOwnProperty.call(current, 'result')) {
+    current = current.result;
+  }
+  return current;
+}
+
+function asArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value == null) return [];
+  if (typeof value === 'object') {
+    if (Array.isArray(value.data)) return value.data;
+    if (Array.isArray(value.matches)) return value.matches;
+    if (Array.isArray(value.items)) return value.items;
+    if (Array.isArray(value.xrefs)) return value.xrefs;
+    return [value];
+  }
+  return [value];
+}
+
+function prettyJson(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (err) {
+    return String(value);
   }
 }
 
-async function refreshAll() {
-  const data = await api('/api/projects');
-  renderProjects(data);
-  const sessions = await api('/api/sessions');
-  if (selectedBinaryId && !selectedSessionId) {
-    const firstForBinary = sessions.sessions.find(s => s.binary_id === selectedBinaryId);
-    if (firstForBinary) selectedSessionId = firstForBinary.runtime_session_id;
+function findProject(projectId) {
+  return state.projects.find((project) => project.project_id === projectId) || null;
+}
+
+function findBinary(binaryId) {
+  for (const project of state.projects) {
+    const binary = (project.binaries || []).find((item) => item.binary_id === binaryId);
+    if (binary) return binary;
   }
-  const select = document.getElementById('sessionSelect');
-  select.innerHTML = '<option value="">-- no session --</option>';
-  for (const session of sessions.sessions) {
-    const opt = document.createElement('option');
-    opt.value = session.runtime_session_id;
-    opt.textContent = `${session.binary_name} :: ${session.runtime_session_id} (${session.status})`;
-    if (session.runtime_session_id === selectedSessionId) opt.selected = true;
-    select.appendChild(opt);
-  }
-  const label = document.getElementById('selectionLabel');
-  label.textContent = selectedBinaryId ? `Selected binary: ${selectedBinaryId}` : 'No binary selected';
-  const indexLabel = document.getElementById('indexStateLabel');
-  if (selectedBinaryId) {
-    const indexes = await api(`/api/binaries/${selectedBinaryId}/indexes`);
-    const st = indexes.index_state;
-    indexLabel.textContent =
-      `indexes => funcs: ${st.functions_refreshed_at || '-'} | strings: ${st.strings_refreshed_at || '-'} | structs: ${st.structs_refreshed_at || '-'}`;
+  return null;
+}
+
+function selectedProject() {
+  return findProject(state.selectedProjectId);
+}
+
+function selectedBinary() {
+  return findBinary(state.selectedBinaryId);
+}
+
+function selectedSessionRecord() {
+  return state.sessions.find((session) => session.runtime_session_id === state.selectedSessionId) || null;
+}
+
+function syncSelectedSession() {
+  const live = state.sessions.find((session) => session.binary_id === state.selectedBinaryId && session.live);
+  state.selectedSessionId = live ? live.runtime_session_id : null;
+}
+
+function renderWorkspaceMeta() {
+  const project = selectedProject();
+  const binary = selectedBinary();
+  const session = selectedSessionRecord();
+  const rows = [
+    ['Project', project ? project.name : '—'],
+    ['Binary', binary ? binary.display_name : '—'],
+    ['Path', binary ? binary.binary_path : '—'],
+    ['IDB', binary?.idb_path || '—'],
+    ['Session', state.selectedSessionId || '—'],
+  ];
+  document.getElementById('workspaceMeta').innerHTML = rows.map(([label, value]) => `
+    <div class='label'>${escapeHtml(label)}</div>
+    <div class='value mono'>${escapeHtml(value)}</div>
+  `).join('');
+  document.getElementById('selectionPill').textContent = binary
+    ? `${binary.display_name}${state.selectedSessionId ? ' · live' : ' · no session'}`
+    : 'No binary selected';
+  const badge = document.getElementById('sessionBadge');
+  if (session && session.live) {
+    badge.textContent = 'Live session';
+    badge.className = 'badge success';
   } else {
-    indexLabel.textContent = 'No cache state';
+    badge.textContent = 'No live session';
+    badge.className = 'badge warn';
   }
+}
+
+function renderProjectTree() {
+  const container = document.getElementById('projectTree');
+  if (!state.projects.length) {
+    container.innerHTML = `<div class='empty'>Create a project to get started.</div>`;
+    return;
+  }
+  container.innerHTML = '';
+  for (const project of state.projects) {
+    const projectEl = document.createElement('div');
+    projectEl.className = `tree-project${project.project_id === state.selectedProjectId ? ' active' : ''}`;
+    projectEl.innerHTML = `
+      <div class='row' style='justify-content:space-between;'>
+        <strong>${escapeHtml(project.name)}</strong>
+        <span class='badge'>${project.binary_count} bin</span>
+      </div>
+      <div class='small'>${escapeHtml(project.root_dir || '')}</div>
+    `;
+    projectEl.onclick = () => selectProject(project.project_id);
+    container.appendChild(projectEl);
+
+    const binariesWrap = document.createElement('div');
+    binariesWrap.className = 'tree-binaries';
+    for (const binary of project.binaries || []) {
+      const isActive = binary.binary_id === state.selectedBinaryId;
+      const hasLive = state.sessions.some((session) => session.binary_id === binary.binary_id && session.live);
+      const binaryEl = document.createElement('div');
+      binaryEl.className = `tree-binary${isActive ? ' active' : ''}`;
+      binaryEl.innerHTML = `
+        <div class='row' style='justify-content:space-between;'>
+          <span>${escapeHtml(binary.display_name)}</span>
+          <span class='badge ${hasLive ? 'success' : ''}'>${hasLive ? 'live' : 'idle'}</span>
+        </div>
+        <div class='small mono'>${escapeHtml(binary.idb_path || binary.binary_path)}</div>
+      `;
+      binaryEl.onclick = () => selectBinary(project.project_id, binary.binary_id);
+      binariesWrap.appendChild(binaryEl);
+    }
+    container.appendChild(binariesWrap);
+  }
+}
+
+function renderIndexBadges() {
+  const stateInfo = state.currentIndexState || {};
+  const container = document.getElementById('indexBadges');
+  const badges = [
+    ['funcs', stateInfo.functions_refreshed_at],
+    ['strings', stateInfo.strings_refreshed_at],
+    ['structs', stateInfo.structs_refreshed_at],
+  ];
+  container.innerHTML = badges.map(([label, value]) => `<span class='badge ${value ? 'success' : ''}'>${label}: ${escapeHtml(value ? new Date(value).toLocaleTimeString() : '—')}</span>`).join('');
+}
+
+function renderInspector() {
+  const binary = selectedBinary();
+  const item = state.selectedItem;
+  const rows = [
+    ['Kind', item?.kind || '—'],
+    ['Name', item?.name || '—'],
+    ['Address', item?.addr || '—'],
+    ['Binary', binary?.display_name || '—'],
+    ['Session', state.selectedSessionId || '—'],
+  ];
+  document.getElementById('inspectorSummary').innerHTML = rows.map(([label, value]) => `
+    <div class='label'>${escapeHtml(label)}</div>
+    <div class='value mono'>${escapeHtml(value)}</div>
+  `).join('');
+  document.getElementById('renameInput').value = item?.name && !String(item.name).startsWith('0x') ? item.name : '';
+}
+
+function renderResourceButtons() {
+  for (const mode of ['functions', 'strings', 'structs', 'history']) {
+    const button = document.getElementById(`resource-${mode}`);
+    button.classList.toggle('active', state.resourceMode === mode);
+  }
+}
+
+function renderTabButtons() {
+  for (const tab of ['decompile', 'disasm', 'strings', 'structs', 'history']) {
+    const button = document.getElementById(`tab-${tab}`);
+    const pane = document.getElementById(`view-${tab}`);
+    button.classList.toggle('active', state.activeTab === tab);
+    pane.classList.toggle('active', state.activeTab === tab);
+  }
+}
+
+function setTab(tab) {
+  state.activeTab = tab;
+  renderTabButtons();
+}
+
+function setResourceMode(mode) {
+  state.resourceMode = mode;
+  renderResourceButtons();
+  if (mode === 'strings' || mode === 'structs' || mode === 'history') {
+    setTab(mode);
+  }
+  refreshResourcePane();
+}
+
+function onResourceFilterChange() {
+  window.clearTimeout(window.__resourceFilterTimer);
+  window.__resourceFilterTimer = window.setTimeout(() => refreshResourcePane(), 160);
+}
+
+async function selectProject(projectId) {
+  state.selectedProjectId = projectId;
+  const project = selectedProject();
+  state.selectedBinaryId = project?.binaries?.[0]?.binary_id || null;
+  syncSelectedSession();
+  state.selectedItem = null;
+  await refreshWorkspaceView();
+}
+
+async function selectBinary(projectId, binaryId) {
+  state.selectedProjectId = projectId;
+  state.selectedBinaryId = binaryId;
+  syncSelectedSession();
+  state.selectedItem = null;
+  await refreshWorkspaceView();
+}
+
+async function refreshWorkspace() {
+  const [projectsPayload, sessionsPayload] = await Promise.all([
+    api('/api/projects'),
+    api('/api/sessions'),
+  ]);
+  state.projects = projectsPayload.projects || [];
+  state.sessions = sessionsPayload.sessions || [];
+
+  if (state.selectedProjectId && !findProject(state.selectedProjectId)) {
+    state.selectedProjectId = null;
+  }
+  if (!state.selectedProjectId && state.projects.length) {
+    state.selectedProjectId = state.projects[0].project_id;
+  }
+
+  if (state.selectedBinaryId && !findBinary(state.selectedBinaryId)) {
+    state.selectedBinaryId = null;
+  }
+  if (!state.selectedBinaryId) {
+    const project = selectedProject();
+    state.selectedBinaryId = project?.binaries?.[0]?.binary_id || null;
+  }
+
+  syncSelectedSession();
+  renderProjectTree();
+  await refreshWorkspaceView();
+}
+
+async function refreshWorkspaceView() {
+  renderWorkspaceMeta();
+  renderProjectTree();
+  renderInspector();
+  renderResourceButtons();
+  renderTabButtons();
+  await loadIndexState();
+  await refreshResourcePane();
+}
+
+async function loadIndexState() {
+  if (!state.selectedBinaryId) {
+    state.currentIndexState = null;
+    renderIndexBadges();
+    return;
+  }
+  const payload = await api(`/api/binaries/${state.selectedBinaryId}/indexes`);
+  state.currentIndexState = payload.index_state || null;
+  renderIndexBadges();
 }
 
 async function createProject() {
   const name = document.getElementById('projectName').value.trim();
-  if (!name) return;
-  const data = await api('/api/projects', {method: 'POST', body: JSON.stringify({name})});
-  selectedProjectId = data.project.project_id;
-  await refreshAll();
+  if (!name) return setStatus('Project name is required.', '', true);
+  const payload = await api('/api/projects', {method: 'POST', body: JSON.stringify({name})});
+  state.selectedProjectId = payload.project.project_id;
+  document.getElementById('projectName').value = '';
+  setStatus(`Created project ${payload.project.name}`);
+  await refreshWorkspace();
 }
 
 async function addBinary() {
-  if (!selectedProjectId) throw new Error('Select a project first');
-  const binary_path = document.getElementById('binaryPath').value.trim();
-  const data = await api(`/api/projects/${selectedProjectId}/binaries`, {method: 'POST', body: JSON.stringify({binary_path})});
-  selectedBinaryId = data.binary.binary_id;
-  await refreshAll();
+  if (!state.selectedProjectId) return setStatus('Select or create a project first.', '', true);
+  const binaryPath = document.getElementById('artifactPath').value.trim();
+  if (!binaryPath) return setStatus('Binary path is required.', '', true);
+  const payload = await api(`/api/projects/${state.selectedProjectId}/binaries`, {method: 'POST', body: JSON.stringify({binary_path: binaryPath})});
+  state.selectedBinaryId = payload.binary.binary_id;
+  document.getElementById('artifactPath').value = '';
+  setStatus(`Added ${payload.binary.display_name}`);
+  await refreshWorkspace();
 }
 
 async function restoreArtifact() {
-  if (!selectedProjectId) throw new Error('Select a project first');
-  const artifact_path = document.getElementById('binaryPath').value.trim();
-  const data = await api(`/api/projects/${selectedProjectId}/restore-artifact`, {method: 'POST', body: JSON.stringify({artifact_path})});
-  selectedBinaryId = data.binary.binary_id;
-  await refreshAll();
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+  if (!state.selectedProjectId) return setStatus('Select or create a project first.', '', true);
+  const artifactPath = document.getElementById('artifactPath').value.trim();
+  if (!artifactPath) return setStatus('Artifact path is required.', '', true);
+  const payload = await api(`/api/projects/${state.selectedProjectId}/restore-artifact`, {method: 'POST', body: JSON.stringify({artifact_path: artifactPath})});
+  state.selectedBinaryId = payload.binary.binary_id;
+  document.getElementById('artifactPath').value = '';
+  setStatus(`Restored ${payload.binary.display_name}`);
+  await refreshWorkspace();
 }
 
 async function openSession() {
-  if (!selectedBinaryId) throw new Error('Select a binary first');
-  const data = await api(`/api/binaries/${selectedBinaryId}/sessions`, {method: 'POST'});
-  selectedSessionId = data.session.runtime_session_id;
-  await refreshAll();
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+  if (!state.selectedBinaryId) return setStatus('Select a binary first.', '', true);
+  const payload = await api(`/api/binaries/${state.selectedBinaryId}/sessions`, {method: 'POST'});
+  state.selectedSessionId = payload.session.runtime_session_id;
+  setStatus('Session started.', payload.session.runtime_session_id);
+  await refreshWorkspace();
+  await refreshIndexes(true);
 }
 
-function selectSession(id) { selectedSessionId = id || null; }
-
-function setAddrInputs(addr) {
-  document.getElementById('addrInput').value = addr || '';
-  document.getElementById('renameAddr').value = addr || '';
-  document.getElementById('commentAddr').value = addr || '';
-  document.getElementById('patchAddr').value = addr || '';
-  document.getElementById('asmAddr').value = addr || '';
-  document.getElementById('typeAddr').value = addr || '';
-  document.getElementById('readStructAddr').value = addr || '';
+async function refreshIndexes(quiet = false) {
+  if (!state.selectedBinaryId) return setStatus('Select a binary first.', '', true);
+  const payload = await api(`/api/binaries/${state.selectedBinaryId}/refresh-indexes`, {
+    method: 'POST',
+    body: JSON.stringify({session_id: state.selectedSessionId}),
+  });
+  state.selectedSessionId = payload.session_id || state.selectedSessionId;
+  if (!quiet) {
+    setStatus('Indexes refreshed.', `funcs ${payload.counts.functions} · strings ${payload.counts.strings} · structs ${payload.counts.structs}`);
+  }
+  await refreshWorkspace();
 }
 
-function renderBrowser(title, items, renderText, onClick) {
-  document.getElementById('browserTitle').textContent = title;
-  const root = document.getElementById('browserList');
-  root.innerHTML = '';
-  for (const item of items) {
+function summarizeFunction(item) {
+  const parts = [];
+  if (item.size != null) parts.push(`size ${item.size}`);
+  if (item.segment) parts.push(item.segment);
+  return parts.join(' · ');
+}
+
+function summarizeStruct(item) {
+  const parts = [];
+  if (item.size != null) parts.push(`size ${item.size}`);
+  if (item.members != null) parts.push(`members ${item.members}`);
+  return parts.join(' · ');
+}
+
+function renderResourceList(items, formatter, clickHandler, emptyMessage) {
+  const container = document.getElementById('resourceList');
+  container.innerHTML = '';
+  if (!items.length) {
+    container.innerHTML = `<div class='empty'>${escapeHtml(emptyMessage)}</div>`;
+    return;
+  }
+  items.forEach((item) => {
     const el = document.createElement('div');
-    el.className = 'list-item';
-    el.innerHTML = renderText(item);
-    el.onclick = () => onClick(item);
-    root.appendChild(el);
+    const active = state.selectedItem && state.selectedItem.kind === item.__kind && state.selectedItem.addr === item.addr && state.selectedItem.name === item.name;
+    el.className = `list-item${active ? ' active' : ''}`;
+    el.innerHTML = formatter(item);
+    el.onclick = () => clickHandler(item);
+    container.appendChild(el);
+  });
+}
+
+function renderStringsTable(items) {
+  const container = document.getElementById('stringsTable');
+  if (!items.length) {
+    container.innerHTML = `<div class='empty'>No cached strings yet. Refresh indexes first.</div>`;
+    return;
+  }
+  const wrap = document.createElement('div');
+  wrap.className = 'table';
+  wrap.innerHTML = `<div class='table-header'><div>Address</div><div>String</div></div>`;
+  items.forEach((item) => {
+    const row = document.createElement('div');
+    const active = state.selectedItem && state.selectedItem.kind === 'string' && state.selectedItem.addr === item.addr;
+    row.className = `table-row${active ? ' active' : ''}`;
+    row.innerHTML = `<div class='mono'>${escapeHtml(item.addr || '—')}</div><div>${escapeHtml(item.string || '')}</div>`;
+    row.onclick = () => selectString(item);
+    wrap.appendChild(row);
+  });
+  container.innerHTML = '';
+  container.appendChild(wrap);
+}
+
+function renderStructsTable(items) {
+  const container = document.getElementById('structsTable');
+  if (!items.length) {
+    container.innerHTML = `<div class='empty'>No cached structs yet. Refresh indexes after analysis changes.</div>`;
+    return;
+  }
+  const wrap = document.createElement('div');
+  wrap.className = 'table';
+  wrap.innerHTML = `<div class='table-header'><div>Name</div><div>Details</div></div>`;
+  items.forEach((item) => {
+    const row = document.createElement('div');
+    const active = state.selectedItem && state.selectedItem.kind === 'struct' && state.selectedItem.name === item.name;
+    row.className = `table-row${active ? ' active' : ''}`;
+    row.innerHTML = `<div class='mono'>${escapeHtml(item.name || '—')}</div><div>${escapeHtml(summarizeStruct(item) || 'Struct')}</div>`;
+    row.onclick = () => selectStruct(item);
+    wrap.appendChild(row);
+  });
+  container.innerHTML = '';
+  container.appendChild(wrap);
+}
+
+function renderHistoryTable(items) {
+  const container = document.getElementById('historyTable');
+  if (!items.length) {
+    container.innerHTML = `<div class='empty'>No history recorded for this binary yet.</div>`;
+    return;
+  }
+  container.innerHTML = items.map((item) => `
+    <div class='panel' style='margin-bottom:10px;'>
+      <div class='panel-body'>
+        <div class='row' style='justify-content:space-between;'>
+          <strong>${escapeHtml(item.operation_type)}</strong>
+          <span class='small'>${escapeHtml(item.created_at || '')}</span>
+        </div>
+        <div class='small'>target: ${escapeHtml(item.target || '—')}</div>
+        <pre style='margin-top:8px;'>${escapeHtml(prettyJson(item.payload || item.result || {}))}</pre>
+      </div>
+    </div>
+  `).join('');
+}
+
+function extractTextBlock(value) {
+  const current = unwrapResult(value);
+  if (current == null) return 'No data.';
+  if (typeof current === 'string') return current;
+  if (Array.isArray(current)) {
+    if (current.every((item) => typeof item === 'string')) return current.join('\n');
+    return current.map((item) => {
+      if (typeof item === 'string') return item;
+      if (item.line) return item.line;
+      if (item.text) return item.text;
+      if (item.disasm) return item.disasm;
+      if (item.address || item.addr) return `${item.address || item.addr} ${item.text || item.disasm || ''}`.trim();
+      return prettyJson(item);
+    }).join('\n');
+  }
+  if (typeof current === 'object') {
+    if (typeof current.code === 'string') return current.code;
+    if (Array.isArray(current.pseudocode)) return current.pseudocode.join('\n');
+    if (typeof current.pseudocode === 'string') return current.pseudocode;
+    if (Array.isArray(current.lines)) {
+      return current.lines.map((line) => typeof line === 'string' ? line : (line.line || line.text || prettyJson(line))).join('\n');
+    }
+    if (current.asm && Array.isArray(current.asm.lines)) {
+      return current.asm.lines
+        .map((line) => `${line.addr || ''} ${line.instruction || line.text || ''}`.trim())
+        .join('\n');
+    }
+    if (Array.isArray(current.instructions)) {
+      return current.instructions.map((insn) => {
+        const addr = insn.address || insn.addr || insn.ea || '';
+        const text = insn.text || insn.disasm || [insn.mnemonic, insn.operands].filter(Boolean).join(' ');
+        return `${addr} ${text}`.trim();
+      }).join('\n');
+    }
+    if (typeof current.text === 'string') return current.text;
+  }
+  return prettyJson(current);
+}
+
+function findFirstAddress(value) {
+  const current = unwrapResult(value);
+  if (typeof current === 'string' && /^0x[0-9a-f]+$/i.test(current.trim())) return current.trim();
+  if (Array.isArray(current)) {
+    for (const item of current) {
+      const found = findFirstAddress(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (current && typeof current === 'object') {
+    for (const key of ['addr', 'address', 'ea', 'start_ea']) {
+      if (current[key]) return String(current[key]);
+    }
+    for (const value of Object.values(current)) {
+      const found = findFirstAddress(value);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+async function refreshResourcePane() {
+  if (!state.selectedBinaryId) {
+    document.getElementById('resourceList').innerHTML = `<div class='empty'>Select a binary to browse cached analysis.</div>`;
+    document.getElementById('stringsTable').innerHTML = `<div class='empty'>Select a binary first.</div>`;
+    document.getElementById('structsTable').innerHTML = `<div class='empty'>Select a binary first.</div>`;
+    document.getElementById('historyTable').innerHTML = `<div class='empty'>Select a binary first.</div>`;
+    return;
+  }
+  const filter = document.getElementById('resourceFilter').value.trim();
+  if (state.resourceMode === 'functions') {
+    const payload = await api(`/api/binaries/${state.selectedBinaryId}/functions?filter=${encodeURIComponent(filter)}&limit=200`);
+    state.currentResourceItems = (payload.functions || []).map((item) => ({...item, __kind: 'function'}));
+    renderResourceList(
+      state.currentResourceItems,
+      (item) => `<div class='row' style='justify-content:space-between;'><strong>${escapeHtml(item.name || item.addr || 'function')}</strong><span class='badge mono'>${escapeHtml(item.addr || '')}</span></div><div class='small'>${escapeHtml(summarizeFunction(item) || 'Function')}</div>`,
+      selectFunction,
+      'No cached functions yet. Start a session and refresh indexes.'
+    );
+    return;
+  }
+  if (state.resourceMode === 'strings') {
+    const payload = await api(`/api/binaries/${state.selectedBinaryId}/strings?filter=${encodeURIComponent(filter)}&limit=200`);
+    state.currentResourceItems = (payload.strings || []).map((item) => ({...item, __kind: 'string'}));
+    renderResourceList(
+      state.currentResourceItems,
+      (item) => `<div class='row' style='justify-content:space-between;'><span class='mono'>${escapeHtml(item.addr || '')}</span></div><div>${escapeHtml(item.string || '')}</div>`,
+      selectString,
+      'No cached strings yet. Refresh indexes first.'
+    );
+    renderStringsTable(state.currentResourceItems);
+    return;
+  }
+  if (state.resourceMode === 'structs') {
+    const payload = await api(`/api/binaries/${state.selectedBinaryId}/structs?filter=${encodeURIComponent(filter)}&limit=200`);
+    state.currentResourceItems = (payload.structs || []).map((item) => ({...item, __kind: 'struct'}));
+    renderResourceList(
+      state.currentResourceItems,
+      (item) => `<div class='row' style='justify-content:space-between;'><strong>${escapeHtml(item.name || 'struct')}</strong></div><div class='small'>${escapeHtml(summarizeStruct(item) || 'Struct')}</div>`,
+      selectStruct,
+      'No cached structs yet.'
+    );
+    renderStructsTable(state.currentResourceItems);
+    return;
+  }
+  const payload = await api(`/api/binaries/${state.selectedBinaryId}/history?limit=100`);
+  state.currentResourceItems = (payload.operations || []).map((item) => ({...item, __kind: 'history'}));
+  renderResourceList(
+    state.currentResourceItems,
+    (item) => `<div class='row' style='justify-content:space-between;'><strong>${escapeHtml(item.operation_type || 'event')}</strong><span class='small'>${escapeHtml(item.created_at || '')}</span></div><div class='small'>${escapeHtml(item.target || '')}</div>`,
+    selectHistoryEntry,
+    'No history yet.'
+  );
+  renderHistoryTable(state.currentResourceItems);
+}
+
+async function selectFunction(item) {
+  state.selectedItem = {
+    kind: 'function',
+    name: item.name || item.addr || 'function',
+    addr: item.addr || '',
+    raw: item,
+  };
+  document.getElementById('gotoInput').value = item.addr || item.name || '';
+  renderInspector();
+  document.getElementById('detailsOutput').textContent = prettyJson(item);
+  await refreshResourcePane();
+  setTab('decompile');
+  await loadLookupDetails(item.addr || item.name || '');
+  await Promise.all([loadDecompiler(item.addr), loadDisasm(item.addr), loadXrefs(item.addr)]);
+}
+
+async function selectString(item) {
+  state.selectedItem = {
+    kind: 'string',
+    name: item.string || item.addr || 'string',
+    addr: item.addr || '',
+    raw: item,
+  };
+  document.getElementById('gotoInput').value = item.addr || '';
+  renderInspector();
+  document.getElementById('detailsOutput').textContent = prettyJson(item);
+  await refreshResourcePane();
+  setTab('strings');
+  await loadXrefs(item.addr);
+}
+
+async function selectStruct(item) {
+  state.selectedItem = {
+    kind: 'struct',
+    name: item.name || 'struct',
+    addr: item.addr || '',
+    raw: item,
+  };
+  renderInspector();
+  document.getElementById('detailsOutput').textContent = prettyJson(item);
+  await refreshResourcePane();
+  setTab('structs');
+  document.getElementById('xrefsList').innerHTML = `<div class='empty'>Cross references are address-based; select a function or string to inspect xrefs.</div>`;
+}
+
+function selectHistoryEntry(item) {
+  state.selectedItem = {
+    kind: 'history',
+    name: item.operation_type || 'history',
+    addr: item.target || '',
+    raw: item,
+  };
+  renderInspector();
+  document.getElementById('detailsOutput').textContent = prettyJson(item);
+  refreshResourcePane();
+  setTab('history');
+}
+
+async function lookupAndOpen() {
+  const query = document.getElementById('gotoInput').value.trim();
+  if (!query) return setStatus('Enter an address or symbol.', '', true);
+  if (!state.selectedSessionId) return setStatus('Start a session first.', '', true);
+  const payload = await api(`/api/sessions/${state.selectedSessionId}/lookup?query=${encodeURIComponent(query)}`);
+  const normalized = unwrapResult(payload.result ?? payload);
+  const addr = findFirstAddress(normalized) || query;
+  state.selectedItem = {
+    kind: 'lookup',
+    name: query,
+    addr,
+    raw: normalized,
+  };
+  renderInspector();
+  document.getElementById('detailsOutput').textContent = prettyJson(normalized);
+  setStatus('Resolved symbol/address.', addr);
+  if (/^0x[0-9a-f]+$/i.test(addr)) {
+    await Promise.all([loadDecompiler(addr), loadDisasm(addr), loadXrefs(addr)]);
+    setTab('decompile');
   }
 }
 
-async function refreshIndexes() {
-  if (!selectedBinaryId) throw new Error('Select a binary first');
-  const data = await api(`/api/binaries/${selectedBinaryId}/refresh-indexes`, {method: 'POST'});
-  if (data.session_id && !selectedSessionId) selectedSessionId = data.session_id;
-  await refreshAll();
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+async function loadLookupDetails(query) {
+  if (!state.selectedSessionId || !query) return;
+  try {
+    const payload = await api(`/api/sessions/${state.selectedSessionId}/lookup?query=${encodeURIComponent(query)}`);
+    const normalized = unwrapResult(payload.result ?? payload);
+    if (state.selectedItem) state.selectedItem.raw = normalized;
+    document.getElementById('detailsOutput').textContent = prettyJson(normalized);
+    renderInspector();
+  } catch (err) {
+    document.getElementById('detailsOutput').textContent = `Lookup failed: ${err.message}`;
+  }
 }
 
-async function loadHistory() {
-  if (!selectedBinaryId) throw new Error('Select a binary first');
-  const data = await api(`/api/binaries/${selectedBinaryId}/history`);
-  renderBrowser(
-    `History (${data.operations.length})`,
-    data.operations,
-    item => `<div><strong>${item.operation_type}</strong></div><div class="small mono">${item.created_at}</div><div class="small mono">${item.target || ''}</div>`,
-    item => {
-      document.getElementById('output').textContent = JSON.stringify(item, null, 2);
-      const maybeAddr = item.payload?.addr || item.payload?.target || '';
-      if (maybeAddr) setAddrInputs(maybeAddr);
+async function loadDecompiler(addr) {
+  if (!state.selectedSessionId || !addr) {
+    document.getElementById('decompileOutput').textContent = 'Start a session and select a function to view pseudocode.';
+    return;
+  }
+  try {
+    const payload = await api(`/api/sessions/${state.selectedSessionId}/decompile?addr=${encodeURIComponent(addr)}`);
+    document.getElementById('decompileOutput').textContent = extractTextBlock(payload.result ?? payload);
+  } catch (err) {
+    document.getElementById('decompileOutput').textContent = `Decompiler error: ${err.message}`;
+  }
+}
+
+async function loadDisasm(addr) {
+  if (!state.selectedSessionId || !addr) {
+    document.getElementById('disasmOutput').textContent = 'Start a session and select a function to view disassembly.';
+    return;
+  }
+  try {
+    const payload = await api(`/api/sessions/${state.selectedSessionId}/disasm?addr=${encodeURIComponent(addr)}`);
+    document.getElementById('disasmOutput').textContent = extractTextBlock(payload.result ?? payload);
+  } catch (err) {
+    document.getElementById('disasmOutput').textContent = `Disassembly error: ${err.message}`;
+  }
+}
+
+function flattenXrefs(value) {
+  const current = unwrapResult(value);
+  if (Array.isArray(current)) {
+    return current.flatMap((item) => flattenXrefs(item));
+  }
+  if (current && typeof current === 'object') {
+    if (Array.isArray(current.xrefs)) return current.xrefs;
+    if (Array.isArray(current.refs)) return current.refs;
+    return [current];
+  }
+  return [];
+}
+
+async function loadXrefs(addr) {
+  const container = document.getElementById('xrefsList');
+  if (!state.selectedSessionId || !addr) {
+    container.innerHTML = `<div class='empty'>Select an address with a live session to view cross references.</div>`;
+    return;
+  }
+  try {
+    const payload = await api(`/api/sessions/${state.selectedSessionId}/xrefs?addr=${encodeURIComponent(addr)}&limit=50`);
+    const items = flattenXrefs(payload.result ?? payload);
+    if (!items.length) {
+      container.innerHTML = `<div class='empty'>No xrefs for ${escapeHtml(addr)}.</div>`;
+      return;
     }
-  );
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+    container.innerHTML = '';
+    items.forEach((item) => {
+      const hitAddr = item.frm || item.from || item.addr || item.address || item.ea || findFirstAddress(item);
+      const summary = item.type || item.kind || item.name || item.text || 'xref';
+      const el = document.createElement('div');
+      el.className = 'xref-item';
+      el.innerHTML = `<div class='row' style='justify-content:space-between;'><span class='mono'>${escapeHtml(hitAddr || '—')}</span><span class='small'>${escapeHtml(summary)}</span></div><div class='small'>${escapeHtml(prettyJson(item).slice(0, 160))}</div>`;
+      if (hitAddr && /^0x[0-9a-f]+$/i.test(String(hitAddr))) {
+        el.onclick = async () => {
+          document.getElementById('gotoInput').value = hitAddr;
+          await lookupAndOpen();
+        };
+      }
+      container.appendChild(el);
+    });
+  } catch (err) {
+    container.innerHTML = `<div class='empty'>Xrefs error: ${escapeHtml(err.message)}</div>`;
+  }
 }
 
-async function loadFunctions() {
-  if (!selectedBinaryId) throw new Error('Select a binary first');
-  const filter = encodeURIComponent(document.getElementById('structFilter').value || '');
-  const data = await api(`/api/binaries/${selectedBinaryId}/functions?filter=${filter}`);
-  currentBrowserMode = 'functions';
-  renderBrowser(
-    `Functions (${data.functions.length})`,
-    data.functions,
-    item => `<div><strong>${item.name}</strong></div><div class="small mono">${item.addr} ${item.size || ''}</div>`,
-    async item => {
-      setAddrInputs(item.addr);
-      await loadDecompile();
-    }
-  );
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+async function refreshInspectorXrefs() {
+  await loadXrefs(state.selectedItem?.addr);
 }
 
-async function lookupAddress() {
-  if (!selectedSessionId) throw new Error('Select a session first');
-  const addr = encodeURIComponent(document.getElementById('addrInput').value.trim());
-  const data = await api(`/api/sessions/${selectedSessionId}/lookup?query=${addr}`);
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+async function renameSelected() {
+  const addr = state.selectedItem?.addr;
+  const newName = document.getElementById('renameInput').value.trim();
+  if (!state.selectedSessionId || !addr) return setStatus('Select an address with a live session first.', '', true);
+  if (!newName) return setStatus('Rename target is required.', '', true);
+  await api(`/api/sessions/${state.selectedSessionId}/rename`, {method: 'POST', body: JSON.stringify({addr, new_name: newName})});
+  setStatus('Rename applied.', `${addr} → ${newName}`);
+  if (state.selectedItem) state.selectedItem.name = newName;
+  await refreshIndexes(true);
+  renderInspector();
 }
 
-async function loadStrings() {
-  if (!selectedBinaryId) throw new Error('Select a binary first');
-  const q = encodeURIComponent(document.getElementById('structFilter').value || '');
-  const data = await api(`/api/binaries/${selectedBinaryId}/strings?filter=${q}`);
-  currentBrowserMode = 'strings';
-  renderBrowser(
-    `Strings (${data.strings.length})`,
-    data.strings,
-    item => `<div class="mono">${item.addr}</div><div>${item.string || item.value || ''}</div>`,
-    item => {
-      setAddrInputs(item.addr);
-      document.getElementById('output').textContent = JSON.stringify(item, null, 2);
-    }
-  );
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+async function commentSelected() {
+  const addr = state.selectedItem?.addr;
+  const comment = document.getElementById('commentInput').value.trim();
+  if (!state.selectedSessionId || !addr) return setStatus('Select an address with a live session first.', '', true);
+  if (!comment) return setStatus('Comment text is required.', '', true);
+  await api(`/api/sessions/${state.selectedSessionId}/comment`, {method: 'POST', body: JSON.stringify({addr, comment})});
+  setStatus('Comment saved.', addr);
+  await refreshResourcePane();
 }
 
-async function loadDecompile() {
-  const addr = encodeURIComponent(document.getElementById('addrInput').value.trim());
-  const data = await api(`/api/sessions/${selectedSessionId}/decompile?addr=${addr}`);
-  const body = data.result || data;
-  document.getElementById('output').textContent = typeof body.pseudocode === 'string' ? body.pseudocode : JSON.stringify(data, null, 2);
-}
-
-async function loadDisasm() {
-  const addr = encodeURIComponent(document.getElementById('addrInput').value.trim());
-  const data = await api(`/api/sessions/${selectedSessionId}/disasm?addr=${addr}`);
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
-}
-
-async function loadStructs() {
-  if (!selectedBinaryId) throw new Error('Select a binary first');
-  const filter = encodeURIComponent(document.getElementById('structFilter').value || '');
-  const data = await api(`/api/binaries/${selectedBinaryId}/structs?filter=${filter}`);
-  currentBrowserMode = 'structs';
-  renderBrowser(
-    `Structs (${data.structs.length})`,
-    data.structs,
-    item => `<div><strong>${item.name}</strong></div><div class="small mono">size=${item.size || '?'} ordinal=${item.ordinal ?? '?'}</div>`,
-    item => {
-      document.getElementById('readStructName').value = item.name || '';
-      document.getElementById('output').textContent = JSON.stringify(item, null, 2);
-    }
-  );
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
-}
-
-async function renameSymbol() {
-  const addr = document.getElementById('renameAddr').value.trim();
-  const new_name = document.getElementById('renameNew').value.trim();
-  const data = await api(`/api/sessions/${selectedSessionId}/rename`, {method: 'POST', body: JSON.stringify({addr, new_name})});
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
-}
-
-async function setComment() {
-  const addr = document.getElementById('commentAddr').value.trim();
-  const comment = document.getElementById('commentText').value.trim();
-  const data = await api(`/api/sessions/${selectedSessionId}/comment`, {method: 'POST', body: JSON.stringify({addr, comment})});
-  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
-}
-
-async function patchBytesAction() {
-  if (!selectedSessionId) throw new Error('Select a session first');
-  const addr = document.getElementById('patchAddr').value.trim();
-  const data = document.getElementById('patchBytesInput').value.trim();
-  const res = await api(`/api/sessions/${selectedSessionId}/patch-bytes`, {method: 'POST', body: JSON.stringify({addr, data})});
-  document.getElementById('output').textContent = JSON.stringify(res, null, 2);
-}
-
-async function patchAsm() {
-  if (!selectedSessionId) throw new Error('Select a session first');
-  const addr = document.getElementById('asmAddr').value.trim();
-  const asm = document.getElementById('asmText').value.trim();
-  const res = await api(`/api/sessions/${selectedSessionId}/patch-asm`, {method: 'POST', body: JSON.stringify({addr, asm})});
-  document.getElementById('output').textContent = JSON.stringify(res, null, 2);
-}
-
-async function applyType() {
-  if (!selectedSessionId) throw new Error('Select a session first');
-  const addr = document.getElementById('typeAddr').value.trim();
-  const typeDecl = document.getElementById('typeDecl').value.trim();
-  const kind = document.getElementById('typeKind').value.trim();
-  const name = document.getElementById('typeName').value.trim();
-  const res = await api(`/api/sessions/${selectedSessionId}/set-type`, {method: 'POST', body: JSON.stringify({addr, type_decl: typeDecl, kind, name})});
-  document.getElementById('output').textContent = JSON.stringify(res, null, 2);
-}
-
-async function readStructView() {
-  if (!selectedSessionId) throw new Error('Select a session first');
-  const addr = document.getElementById('readStructAddr').value.trim();
-  const struct_name = document.getElementById('readStructName').value.trim();
-  const res = await api(`/api/sessions/${selectedSessionId}/read-struct`, {method: 'POST', body: JSON.stringify({addr, struct_name})});
-  document.getElementById('output').textContent = JSON.stringify(res, null, 2);
-}
-
-async function declareStruct() {
-  if (!selectedSessionId) throw new Error('Select a session first');
-  const struct_name = document.getElementById('structDeclName').value.trim();
-  const body = document.getElementById('structDeclBody').value.trim();
-  const res = await api(`/api/sessions/${selectedSessionId}/declare-struct`, {method: 'POST', body: JSON.stringify({struct_name, body})});
-  document.getElementById('output').textContent = JSON.stringify(res, null, 2);
-  if (selectedBinaryId) await refreshAll();
-}
-
-refreshAll().catch(err => document.getElementById('output').textContent = String(err));
+window.addEventListener('load', async () => {
+  try {
+    renderResourceButtons();
+    setTab('decompile');
+    renderInspector();
+    await refreshWorkspace();
+    setStatus('Workspace ready.');
+  } catch (err) {
+    setStatus(err.message, '', true);
+    document.getElementById('detailsOutput').textContent = String(err);
+  }
+});
 </script>
 </body>
 </html>
-'''
+"""
 
 
 class HeadlessWebBackend:
@@ -485,6 +1273,12 @@ class HeadlessWebBackend:
             runtime_session_id=runtime_session_id,
             target=target,
         )
+
+    @staticmethod
+    def _unwrap_tool_result(value: Any) -> Any:
+        if isinstance(value, dict) and "result" in value and len(value) == 1:
+            return value["result"]
+        return value
 
     def create_project(self, payload: dict[str, Any]) -> dict[str, Any]:
         name = (payload.get('name') or '').strip()
@@ -590,6 +1384,11 @@ class HeadlessWebBackend:
         if not query:
             raise ValueError('query is required')
         return self.session_tool(runtime_session_id, 'lookup_funcs', {'queries': query})
+
+    def xrefs(self, runtime_session_id: str, addr: str, limit: int = 50) -> dict[str, Any]:
+        if not addr:
+            raise ValueError('addr is required')
+        return self.session_tool(runtime_session_id, 'xrefs_to', {'addrs': addr, 'limit': limit})
 
     def decompile(self, runtime_session_id: str, addr: str) -> dict[str, Any]:
         if not addr:
@@ -713,6 +1512,7 @@ class HeadlessWebBackend:
             {'filter': struct_name},
             session_id=runtime_session_id,
         )
+        structs = self._unwrap_tool_result(structs)
         if isinstance(structs, list):
             current = self.store.list_struct_index(ctx['binary_id'], '', 100000, 0)
             merged = {item.get('name'): item for item in current}
@@ -754,6 +1554,7 @@ class HeadlessWebBackend:
                 {'queries': {'filter': '*', 'offset': offset, 'count': 500}},
                 session_id=sid,
             )
+            page_result = self._unwrap_tool_result(page_result)
             page = page_result[0] if isinstance(page_result, list) else page_result
             batch = page.get('data', [])
             functions.extend(batch)
@@ -770,6 +1571,7 @@ class HeadlessWebBackend:
                 {'pattern': '.*', 'offset': offset, 'limit': 500},
                 session_id=sid,
             )
+            string_result = self._unwrap_tool_result(string_result)
             batch = string_result.get('matches', [])
             strings.extend(batch)
             cursor = string_result.get('cursor', {})
@@ -783,6 +1585,7 @@ class HeadlessWebBackend:
             {'filter': ''},
             session_id=sid,
         )
+        structs = self._unwrap_tool_result(structs)
         self.store.replace_struct_index(binary_id, structs if isinstance(structs, list) else [])
 
         self.store.update_binary_idb_path(
@@ -978,6 +1781,17 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
             if path.startswith('/api/sessions/') and path.endswith('/lookup'):
                 session_id = path.split('/')[3]
                 self._json(200, self.backend.lookup(session_id, query.get('query', [''])[0]))
+                return
+            if path.startswith('/api/sessions/') and path.endswith('/xrefs'):
+                session_id = path.split('/')[3]
+                self._json(
+                    200,
+                    self.backend.xrefs(
+                        session_id,
+                        query.get('addr', [''])[0],
+                        int(query.get('limit', ['50'])[0]),
+                    ),
+                )
                 return
             if path.startswith('/api/sessions/') and path.endswith('/strings'):
                 session_id = path.split('/')[3]

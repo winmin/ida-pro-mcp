@@ -1227,6 +1227,38 @@ class HeadlessWebBackend:
     def shutdown(self) -> None:
         self.sessions.cleanup()
 
+    def ensure_project(self, name: str, root_dir: str | Path | None = None) -> dict[str, Any]:
+        normalized = name.strip()
+        if not normalized:
+            raise ValueError('project name is required')
+        for project in self.store.list_projects():
+            if project['name'] == normalized:
+                return self.store.get_project(project['project_id']) or project
+        return self.store.create_project(normalized, root_dir or str(Path.cwd()))
+
+    def bootstrap_artifacts(
+        self,
+        project_name: str,
+        artifact_paths: list[str],
+        *,
+        root_dir: str | Path | None = None,
+        open_session: bool = False,
+        refresh_indexes: bool = False,
+    ) -> dict[str, Any]:
+        project = self.ensure_project(project_name, root_dir)
+        bootstrapped: list[dict[str, Any]] = []
+        for artifact_path in artifact_paths:
+            restored = self.restore_artifact(project['project_id'], {'artifact_path': artifact_path})
+            binary = restored['binary']
+            item: dict[str, Any] = {'binary': binary, 'restored': True}
+            if open_session:
+                opened = self.open_session(binary['binary_id'])
+                item['session'] = opened['session']
+                if refresh_indexes:
+                    item['indexes'] = self.refresh_indexes(binary['binary_id'], opened['session']['runtime_session_id'])
+            bootstrapped.append(item)
+        return {'project': project, 'items': bootstrapped}
+
     def list_projects(self) -> dict[str, Any]:
         projects = self.store.list_projects()
         for project in projects:
@@ -1891,6 +1923,10 @@ def main() -> None:
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--db', type=Path, default=Path('.ida-headless/projects.sqlite3'))
+    parser.add_argument('--project-name', default='default')
+    parser.add_argument('--artifact', action='append', default=[], help='Artifact (.i64/.idb/binary) to restore on startup; may be repeated')
+    parser.add_argument('--open-session', action='store_true', help='Open a live session for startup artifacts')
+    parser.add_argument('--refresh-on-start', action='store_true', help='Refresh indexes for startup artifacts after opening sessions')
     parser.add_argument('--unsafe', action='store_true')
     parser.add_argument('--verbose', '-v', action='store_true')
     args = parser.parse_args()
@@ -1902,6 +1938,20 @@ def main() -> None:
 
     backend = HeadlessWebBackend(args.db, unsafe=args.unsafe, verbose=args.verbose)
     atexit.register(backend.shutdown)
+
+    if args.artifact:
+        boot = backend.bootstrap_artifacts(
+            args.project_name,
+            args.artifact,
+            root_dir=Path.cwd(),
+            open_session=args.open_session or args.refresh_on_start,
+            refresh_indexes=args.refresh_on_start,
+        )
+        logger.info(
+            'Bootstrapped %d artifact(s) into project %s',
+            len(boot['items']),
+            boot['project']['name'],
+        )
 
     handler = type('BoundHeadlessApiHandler', (HeadlessApiHandler,), {'backend': backend})
     server = ThreadingHTTPServer((args.host, args.port), handler)

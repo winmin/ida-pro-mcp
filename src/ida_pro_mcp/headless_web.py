@@ -1446,17 +1446,90 @@ async function loadDisasm(addr) {
   }
 }
 
-function flattenXrefs(value) {
+function normalizeXrefBuckets(value) {
   const current = unwrapResult(value);
+
   if (Array.isArray(current)) {
-    return current.flatMap((item) => flattenXrefs(item));
+    if (current.length && current[0] && typeof current[0] === 'object' && Array.isArray(current[0].data)) {
+      return normalizeXrefBuckets(current[0]);
+    }
+    if (current.length && current[0] && typeof current[0] === 'object' && Array.isArray(current[0].xrefs)) {
+      return {to: current[0].xrefs || [], from: []};
+    }
   }
+
   if (current && typeof current === 'object') {
-    if (Array.isArray(current.xrefs)) return current.xrefs;
-    if (Array.isArray(current.refs)) return current.refs;
-    return [current];
+    if (Array.isArray(current.data)) {
+      return {
+        to: current.data.filter((item) => item.direction === 'to'),
+        from: current.data.filter((item) => item.direction === 'from'),
+        total: current.total,
+        resolvedAddr: current.resolved_addr || current.query || null,
+      };
+    }
+    if (Array.isArray(current.xrefs)) {
+      return {to: current.xrefs || [], from: []};
+    }
   }
-  return [];
+
+  return {to: [], from: [], total: 0, resolvedAddr: null};
+}
+
+function xrefRowAddress(item, direction) {
+  if (direction === 'to') return item.from || item.addr || item.address || item.ea || findFirstAddress(item);
+  return item.to || item.addr || item.address || item.ea || findFirstAddress(item);
+}
+
+function xrefRowSummary(item, direction) {
+  const fn = item.fn;
+  const fnName = typeof fn === 'string' ? fn : (fn?.name || fn?.addr || '');
+  const type = item.type || item.kind || 'xref';
+  if (direction === 'to') {
+    return [fnName, type, 'incoming'].filter(Boolean).join(' · ');
+  }
+  return [fnName, type, 'outgoing'].filter(Boolean).join(' · ');
+}
+
+function renderXrefGroup(title, direction, items, emptyText) {
+  if (!items.length) {
+    return `
+      <div class='panel' style='margin-bottom:10px;'>
+        <div class='panel-header'>
+          <div class='panel-title'>${escapeHtml(title)}</div>
+          <span class='badge'>0</span>
+        </div>
+        <div class='panel-body'>
+          <div class='empty'>${escapeHtml(emptyText)}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class='panel' style='margin-bottom:10px;'>
+      <div class='panel-header'>
+        <div class='panel-title'>${escapeHtml(title)}</div>
+        <span class='badge success'>${items.length}</span>
+      </div>
+      <div class='panel-body' style='padding:0;'>
+        ${items.map((item) => {
+          const hitAddr = xrefRowAddress(item, direction);
+          const summary = xrefRowSummary(item, direction);
+          const encodedAddr = encodeURIComponent(hitAddr || '');
+          const canJump = hitAddr && /^0x[0-9a-f]+$/i.test(String(hitAddr));
+          return `
+            <div class='xref-item' ${canJump ? `data-jump-addr='${encodedAddr}'` : ''}>
+              <div class='row' style='justify-content:space-between;'>
+                <span class='mono'>${escapeHtml(hitAddr || '—')}</span>
+                <span class='small'>${escapeHtml(item.type || item.kind || direction)}</span>
+              </div>
+              <div class='small'>${escapeHtml(summary)}</div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
 }
 
 async function loadXrefs(addr) {
@@ -1467,25 +1540,24 @@ async function loadXrefs(addr) {
   }
   try {
     const payload = await api(`/api/sessions/${state.selectedSessionId}/xrefs?addr=${encodeURIComponent(addr)}&limit=50`);
-    const items = flattenXrefs(payload.result ?? payload);
-    if (!items.length) {
+    const grouped = normalizeXrefBuckets(payload.result ?? payload);
+    const incoming = grouped.to || [];
+    const outgoing = grouped.from || [];
+    if (!incoming.length && !outgoing.length) {
       container.innerHTML = `<div class='empty'>No xrefs for ${escapeHtml(addr)}.</div>`;
       return;
     }
-    container.innerHTML = '';
-    items.forEach((item) => {
-      const hitAddr = item.frm || item.from || item.addr || item.address || item.ea || findFirstAddress(item);
-      const summary = item.type || item.kind || item.name || item.text || 'xref';
-      const el = document.createElement('div');
-      el.className = 'xref-item';
-      el.innerHTML = `<div class='row' style='justify-content:space-between;'><span class='mono'>${escapeHtml(hitAddr || '—')}</span><span class='small'>${escapeHtml(summary)}</span></div><div class='small'>${escapeHtml(prettyJson(item).slice(0, 160))}</div>`;
-      if (hitAddr && /^0x[0-9a-f]+$/i.test(String(hitAddr))) {
-        el.onclick = async () => {
-          document.getElementById('gotoInput').value = hitAddr;
-          await lookupAndOpen();
-        };
-      }
-      container.appendChild(el);
+    container.innerHTML = `
+      ${renderXrefGroup('Incoming refs (to current)', 'to', incoming, 'No incoming references.')}
+      ${renderXrefGroup('Outgoing refs (from current)', 'from', outgoing, 'No outgoing references.')}
+    `;
+    container.querySelectorAll('[data-jump-addr]').forEach((node) => {
+      node.onclick = async () => {
+        const jumpAddr = decodeURIComponent(node.getAttribute('data-jump-addr') || '');
+        if (!jumpAddr) return;
+        document.getElementById('gotoInput').value = jumpAddr;
+        await lookupAndOpen();
+      };
     });
   } catch (err) {
     container.innerHTML = `<div class='empty'>Xrefs error: ${escapeHtml(err.message)}</div>`;
@@ -1846,7 +1918,23 @@ class HeadlessWebBackend:
     def xrefs(self, runtime_session_id: str, addr: str, limit: int = 50) -> dict[str, Any]:
         if not addr:
             raise ValueError('addr is required')
-        return self.session_tool(runtime_session_id, 'xrefs_to', {'addrs': addr, 'limit': limit})
+        return self.session_tool(
+            runtime_session_id,
+            'xref_query',
+            {
+                'queries': {
+                    'query': addr,
+                    'direction': 'both',
+                    'xref_type': 'any',
+                    'offset': 0,
+                    'count': max(limit * 2, limit),
+                    'include_fn': True,
+                    'dedup': True,
+                    'sort_by': 'addr',
+                    'descending': False,
+                }
+            },
+        )
 
     def decompile(self, runtime_session_id: str, addr: str) -> dict[str, Any]:
         if not addr:

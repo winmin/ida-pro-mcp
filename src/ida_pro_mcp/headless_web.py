@@ -14,7 +14,201 @@ from ida_pro_mcp.session_mcp_server import SessionMcpServer
 
 logger = logging.getLogger(__name__)
 
-INDEX_HTML = """<!doctype html>
+DASHBOARD_HTML = """<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>IDA Dashboard</title>
+<style>
+:root {
+  --bg: #1e1e1e; --panel: #252526; --panel2: #2d2d30; --border: #3c3c3c;
+  --text: #d4d4d4; --muted: #9da5b4; --accent: #0e639c; --success: #2ea043;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+button,input { font:inherit; }
+button { cursor:pointer; border:1px solid var(--border); background:var(--panel2); color:var(--text); border-radius:6px; padding:8px 10px; }
+button.primary { background:var(--accent); border-color:#1177bb; }
+input { width:100%; border:1px solid var(--border); background:#1f1f1f; color:var(--text); border-radius:6px; padding:8px 10px; }
+header { display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid var(--border); background:#181818; }
+main { padding:16px; display:grid; grid-template-columns: 320px 1fr; gap:16px; min-height: calc(100vh - 58px); }
+.sidebar, .content { min-width:0; }
+.panel { border:1px solid var(--border); background:var(--panel); border-radius:10px; overflow:hidden; margin-bottom:16px; }
+.panel-header { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px; border-bottom:1px solid var(--border); background:#26272b; }
+.panel-title { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.panel-body { padding:12px; }
+.row { display:flex; gap:8px; align-items:center; }
+.row.wrap { flex-wrap:wrap; }
+.stack { display:flex; flex-direction:column; gap:10px; }
+.project-card, .binary-card { border:1px solid var(--border); border-radius:8px; padding:10px; background:#202124; }
+.project-card.active { outline:2px solid #3794ff; }
+.binary-card { margin-top:8px; }
+.badge { display:inline-flex; align-items:center; border:1px solid var(--border); border-radius:999px; padding:2px 8px; font-size:11px; color:var(--muted); }
+.badge.success { color:#9be9a8; border-color:rgba(46,160,67,.55); }
+.small { font-size:12px; color:var(--muted); }
+.mono { font-family: var(--mono); }
+.actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+.summary-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px; }
+.summary-card { border:1px solid var(--border); border-radius:8px; background:#202124; padding:12px; }
+.empty { border:1px dashed var(--border); border-radius:8px; padding:18px; color:var(--muted); }
+pre { margin:0; white-space:pre-wrap; word-break:break-word; font-family:var(--mono); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <div><strong>IDA Dashboard</strong> <span class='small'>projects · binaries · sessions</span></div>
+  <div id='dashStatus' class='small'>Ready.</div>
+</header>
+<main>
+  <aside class='sidebar'>
+    <section class='panel'>
+      <div class='panel-header'><div class='panel-title'>Create Project</div></div>
+      <div class='panel-body stack'>
+        <input id='projectName' placeholder='Project name'>
+        <button class='primary' onclick='createProject()'>Create</button>
+      </div>
+    </section>
+    <section class='panel'>
+      <div class='panel-header'><div class='panel-title'>Import Artifact</div></div>
+      <div class='panel-body stack'>
+        <input id='artifactPath' placeholder='/path/to/binary or .i64'>
+        <div class='small'>Selected project: <span id='selectedProjectName'>none</span></div>
+        <div class='row'>
+          <button onclick='addBinary()'>Add Binary</button>
+          <button onclick='restoreArtifact()'>Restore</button>
+        </div>
+      </div>
+    </section>
+    <section class='panel'>
+      <div class='panel-header'><div class='panel-title'>Projects</div><button onclick='refreshDashboard()'>Refresh</button></div>
+      <div class='panel-body'><div id='projectList' class='stack'></div></div>
+    </section>
+  </aside>
+  <section class='content'>
+    <section class='panel'>
+      <div class='panel-header'><div class='panel-title'>Overview</div></div>
+      <div class='panel-body'><div id='summaryGrid' class='summary-grid'></div></div>
+    </section>
+    <section class='panel'>
+      <div class='panel-header'><div class='panel-title'>Selected Project</div></div>
+      <div class='panel-body'><div id='projectDetail'></div></div>
+    </section>
+  </section>
+</main>
+<script>
+const dashState = { projects: [], sessions: [], selectedProjectId: null };
+function esc(v){ return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function setDashStatus(msg){ document.getElementById('dashStatus').textContent = msg; }
+async function api(path, options={}) {
+  const response = await fetch(path, { headers:{'Content-Type':'application/json'}, ...options });
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : {};
+  if (!response.ok) throw new Error(payload.error || response.statusText);
+  return payload;
+}
+function selectedProject(){ return dashState.projects.find(p => p.project_id === dashState.selectedProjectId) || null; }
+function liveSessionForBinary(binaryId){ return dashState.sessions.find(s => s.binary_id === binaryId && s.live); }
+function renderSummary(){
+  const totalProjects = dashState.projects.length;
+  const totalBinaries = dashState.projects.reduce((n,p)=>n+(p.binaries||[]).length,0);
+  const totalLive = dashState.sessions.filter(s => s.live).length;
+  document.getElementById('summaryGrid').innerHTML = [
+    ['Projects', totalProjects], ['Binaries', totalBinaries], ['Live sessions', totalLive]
+  ].map(([k,v]) => `<div class='summary-card'><div class='small'>${esc(k)}</div><div style='font-size:28px;font-weight:700;margin-top:6px;'>${esc(v)}</div></div>`).join('');
+}
+function renderProjects(){
+  const list = document.getElementById('projectList');
+  if (!dashState.projects.length) { list.innerHTML = `<div class='empty'>No projects yet.</div>`; return; }
+  list.innerHTML = dashState.projects.map((project) => `
+    <div class='project-card ${project.project_id === dashState.selectedProjectId ? 'active' : ''}' onclick="selectProject('${project.project_id}')">
+      <div class='row' style='justify-content:space-between;'><strong>${esc(project.name)}</strong><span class='badge'>${project.binary_count} bin</span></div>
+      <div class='small'>${esc(project.root_dir || '')}</div>
+    </div>`).join('');
+  document.getElementById('selectedProjectName').textContent = selectedProject()?.name || 'none';
+}
+function renderProjectDetail(){
+  const project = selectedProject();
+  const target = document.getElementById('projectDetail');
+  if (!project) { target.innerHTML = `<div class='empty'>Select a project.</div>`; return; }
+  const binaries = project.binaries || [];
+  if (!binaries.length) { target.innerHTML = `<div class='empty'>Project has no binaries yet.</div>`; return; }
+  target.innerHTML = binaries.map((binary) => {
+    const live = liveSessionForBinary(binary.binary_id);
+    return `
+      <div class='binary-card'>
+        <div class='row' style='justify-content:space-between;align-items:flex-start;'>
+          <div>
+            <div><strong>${esc(binary.display_name)}</strong></div>
+            <div class='small mono'>${esc(binary.idb_path || binary.binary_path)}</div>
+          </div>
+          <span class='badge ${live ? 'success' : ''}'>${live ? 'live' : 'idle'}</span>
+        </div>
+        <div class='actions'>
+          <button onclick="openWorkspace('${binary.binary_id}')">Open Workspace</button>
+          <button onclick="startSession('${binary.binary_id}')">Start Session</button>
+          <button onclick="refreshIndexes('${binary.binary_id}')">Refresh Indexes</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+function selectProject(projectId){ dashState.selectedProjectId = projectId; renderProjects(); renderProjectDetail(); }
+function openWorkspace(binaryId){ window.location.href = `/workspace/${binaryId}`; }
+async function refreshDashboard(){
+  const [projects, sessions] = await Promise.all([api('/api/projects'), api('/api/sessions')]);
+  dashState.projects = projects.projects || [];
+  dashState.sessions = sessions.sessions || [];
+  if (dashState.selectedProjectId && !dashState.projects.find(p => p.project_id === dashState.selectedProjectId)) dashState.selectedProjectId = null;
+  if (!dashState.selectedProjectId && dashState.projects.length) dashState.selectedProjectId = dashState.projects[0].project_id;
+  renderSummary(); renderProjects(); renderProjectDetail();
+}
+async function createProject(){
+  const name = document.getElementById('projectName').value.trim();
+  if (!name) return setDashStatus('Project name required.');
+  const result = await api('/api/projects', { method:'POST', body: JSON.stringify({name}) });
+  document.getElementById('projectName').value = '';
+  dashState.selectedProjectId = result.project.project_id;
+  await refreshDashboard();
+  setDashStatus(`Created ${result.project.name}`);
+}
+async function addBinary(){
+  if (!dashState.selectedProjectId) return setDashStatus('Select a project first.');
+  const binary_path = document.getElementById('artifactPath').value.trim();
+  if (!binary_path) return setDashStatus('Binary path required.');
+  await api(`/api/projects/${dashState.selectedProjectId}/binaries`, { method:'POST', body: JSON.stringify({binary_path}) });
+  document.getElementById('artifactPath').value = '';
+  await refreshDashboard();
+  setDashStatus('Binary added.');
+}
+async function restoreArtifact(){
+  if (!dashState.selectedProjectId) return setDashStatus('Select a project first.');
+  const artifact_path = document.getElementById('artifactPath').value.trim();
+  if (!artifact_path) return setDashStatus('Artifact path required.');
+  await api(`/api/projects/${dashState.selectedProjectId}/restore-artifact`, { method:'POST', body: JSON.stringify({artifact_path}) });
+  document.getElementById('artifactPath').value = '';
+  await refreshDashboard();
+  setDashStatus('Artifact restored.');
+}
+async function startSession(binaryId){
+  await api(`/api/binaries/${binaryId}/sessions`, { method:'POST' });
+  await refreshDashboard();
+  setDashStatus('Session started.');
+}
+async function refreshIndexes(binaryId){
+  await api(`/api/binaries/${binaryId}/refresh-indexes`, { method:'POST', body: '{}' });
+  await refreshDashboard();
+  setDashStatus('Indexes refreshed.');
+}
+window.addEventListener('load', async () => {
+  try { await refreshDashboard(); setDashStatus('Dashboard ready.'); } catch (err) { setDashStatus(err.message); }
+});
+</script>
+</body>
+</html>
+"""
+
+WORKSPACE_HTML = """<!doctype html>
 <html lang='en'>
 <head>
 <meta charset='utf-8'>
@@ -452,7 +646,9 @@ code, .mono { font-family: var(--mono); }
 </div>
 
 <script>
+const INITIAL_BINARY_ID = __INITIAL_BINARY_ID__;
 const state = {
+  initialBinaryId: INITIAL_BINARY_ID,
   projects: [],
   sessions: [],
   selectedProjectId: null,
@@ -538,6 +734,15 @@ function findBinary(binaryId) {
   for (const project of state.projects) {
     const binary = (project.binaries || []).find((item) => item.binary_id === binaryId);
     if (binary) return binary;
+  }
+  return null;
+}
+
+function findProjectIdByBinary(binaryId) {
+  for (const project of state.projects) {
+    if ((project.binaries || []).some((item) => item.binary_id === binaryId)) {
+      return project.project_id;
+    }
   }
   return null;
 }
@@ -717,15 +922,24 @@ async function refreshWorkspace() {
   state.projects = projectsPayload.projects || [];
   state.sessions = sessionsPayload.sessions || [];
 
+  if (state.initialBinaryId && findBinary(state.initialBinaryId)) {
+    state.selectedBinaryId = state.initialBinaryId;
+    state.selectedProjectId = findProjectIdByBinary(state.initialBinaryId);
+    state.initialBinaryId = null;
+  }
+
   if (state.selectedProjectId && !findProject(state.selectedProjectId)) {
     state.selectedProjectId = null;
   }
-  if (!state.selectedProjectId && state.projects.length) {
-    state.selectedProjectId = state.projects[0].project_id;
-  }
-
   if (state.selectedBinaryId && !findBinary(state.selectedBinaryId)) {
     state.selectedBinaryId = null;
+  }
+
+  if (!state.selectedProjectId && state.selectedBinaryId) {
+    state.selectedProjectId = findProjectIdByBinary(state.selectedBinaryId);
+  }
+  if (!state.selectedProjectId && state.projects.length) {
+    state.selectedProjectId = state.projects[0].project_id;
   }
   if (!state.selectedBinaryId) {
     const project = selectedProject();
@@ -1751,6 +1965,10 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _workspace_html(self, binary_id: str) -> str:
+        self.backend._require_binary(binary_id)
+        return WORKSPACE_HTML.replace('__INITIAL_BINARY_ID__', json.dumps(binary_id))
+
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get('Content-Length', '0'))
         if length <= 0:
@@ -1763,7 +1981,11 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         try:
             if path == '/':
-                self._html(INDEX_HTML)
+                self._html(DASHBOARD_HTML)
+                return
+            if path.startswith('/workspace/'):
+                binary_id = path.split('/')[2]
+                self._html(self._workspace_html(binary_id))
                 return
             if path == '/api/projects':
                 self._json(200, self.backend.list_projects())

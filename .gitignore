@@ -21,11 +21,18 @@ venv*/
 *.id1
 *.id2
 *.til
+*.elf
+!tests/typed_fixture.elf
 
 # Generated server files (historical)
 server_generated.py
 
 # Coverage
-htmlcov/
 .coverage*
+htmlcov/
 coverage.xml
+scalene-profile.json
+.omp/
+
+# MCP config
+.mcp.json

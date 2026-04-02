@@ -12,6 +12,14 @@ Architecture:
 - api_*.py: Modular API implementations (71 tools + 24 resources)
 """
 
+# Ignore SIGPIPE to prevent IDA from being killed when an MCP client
+# disconnects while the HTTP server is writing a response. IDA's embedded
+# Python may not preserve CPython's default SIG_IGN for SIGPIPE.
+import signal
+
+if hasattr(signal, "SIGPIPE"):
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
 # Import infrastructure modules
 from . import rpc
 from . import sync
@@ -28,6 +36,9 @@ from . import api_stack
 from . import api_debug
 from . import api_python
 from . import api_resources
+from . import api_survey
+from . import api_composite
+from . import api_discovery
 
 # Re-export key components for external use
 from .sync import idasync, IDAError, IDASyncError, CancelledError
@@ -35,6 +46,7 @@ from .rpc import MCP_SERVER, MCP_UNSAFE, tool, unsafe, resource
 from .tests import run_tests, test, set_sample_size, get_sample_size
 from .http import IdaMcpHttpRequestHandler
 from .api_core import init_caches
+from .api_discovery import set_local_instance
 
 __all__ = [
     # Infrastructure modules
@@ -52,6 +64,9 @@ __all__ = [
     "api_debug",
     "api_python",
     "api_resources",
+    "api_survey",
+    "api_composite",
+    "api_discovery",
     # Re-exported components
     "idasync",
     "IDAError",
@@ -68,4 +83,5 @@ __all__ = [
     "get_sample_size",
     "IdaMcpHttpRequestHandler",
     "init_caches",
+    "set_local_instance",
 ]

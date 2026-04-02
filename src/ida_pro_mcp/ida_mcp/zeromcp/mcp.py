@@ -1,8 +1,12 @@
 import re
+import select
+import socket
 import sys
 import time
 import uuid
 import json
+import gzip
+import zlib
 import inspect
 import threading
 import traceback
@@ -143,14 +147,9 @@ class McpHttpRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._check_auth():
             return
-        # Read request body
-        content_length = int(self.headers.get("Content-Length", 0))
-
-        if content_length > self.mcp_server.post_body_limit:
-            self.send_error(413, f"Payload Too Large: exceeds {self.mcp_server.post_body_limit} bytes")
+        body = self._read_body()
+        if body is None:
             return
-
-        body = self.rfile.read(content_length) if content_length > 0 else b""
 
         match urlparse(self.path).path:
             case "/sse":
@@ -165,6 +164,50 @@ class McpHttpRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_cors_headers(preflight=True)
         self.end_headers()
+
+    def _read_body(self) -> bytes | None:
+        if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+            raw = self._read_chunked()
+        else:
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length > self.mcp_server.post_body_limit:
+                self.send_error(413, f"Payload Too Large: exceeds {self.mcp_server.post_body_limit} bytes")
+                return None
+            raw = self.rfile.read(content_length) if content_length > 0 else b""
+
+        if len(raw) > self.mcp_server.post_body_limit:
+            self.send_error(413, f"Payload Too Large: exceeds {self.mcp_server.post_body_limit} bytes")
+            return None
+
+        return self._decompress_body(raw)
+
+    def _read_chunked(self) -> bytes:
+        body = b""
+        limit = self.mcp_server.post_body_limit
+        while True:
+            line = self.rfile.readline().split(b";")[0].strip()
+            chunk_size = int(line, 16)
+            if chunk_size == 0:
+                # Consume trailer fields until blank line
+                while self.rfile.readline().strip():
+                    pass
+                break
+            body += self.rfile.read(min(chunk_size, limit + 1 - len(body)))
+            if len(body) > limit:
+                return body
+            self.rfile.readline()
+        return body
+
+    def _decompress_body(self, data: bytes) -> bytes:
+        encoding = self.headers.get("Content-Encoding", "").lower().strip()
+        if encoding in ("gzip", "x-gzip"):
+            return gzip.decompress(data)
+        elif encoding == "deflate":
+            if data[:1] == b'\x78':
+                return zlib.decompress(data)
+            else:
+                return zlib.decompress(data, -15)
+        return data
 
     def _handle_sse_get(self):
         # Create SSE connection wrapper
@@ -183,15 +226,37 @@ class McpHttpRequestHandler(BaseHTTPRequestHandler):
             # Send endpoint event with session ID for routing
             conn.send_event("endpoint", f"/sse?session={conn.session_id}")
 
-            # Keep connection alive with periodic pings
+            # TCP disconnect: kernel gets FIN/RST immediately, but Python only sees it when we
+            # read (EOF) or write (BrokenPipeError). We only write every 30s, so we never "see"
+            # the disconnect until then. Fix: use select() to wait for socket readable; when
+            # client closes, socket becomes readable and recv() returns 0 (EOF).
+            sock = self.connection
+            if sock and hasattr(sock, "settimeout"):
+                try:
+                    sock.settimeout(1.0)
+                except OSError:
+                    pass
+
             last_ping = time.time()
             while conn.alive and self.mcp_server._running:
                 now = time.time()
+                # Detect disconnect without writing: select() says when socket is readable
+                if sock:
+                    try:
+                        r, _, _ = select.select([sock], [], [], 1.0)
+                        if r:
+                            # Readable: peer closed (EOF) or sent data. SSE client sends nothing.
+                            if sock.recv(1, socket.MSG_PEEK) == b"":
+                                break
+                    except (OSError, socket.error, ConnectionResetError, BrokenPipeError):
+                        break
+                else:
+                    time.sleep(1)
+
                 if now - last_ping > 30:  # Ping every 30 seconds
                     if not conn.send_event("ping", {}):
                         break
                     last_ping = now
-                time.sleep(1)
 
         finally:
             conn.alive = False
@@ -205,22 +270,27 @@ class McpHttpRequestHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Missing ?session for SSE POST")
             return
 
+        sse_conn = self.mcp_server._sse_connections.get(session_id)
+        if sse_conn is None or not sse_conn.alive:
+            self.send_error(400, f"No active SSE connection found for session {session_id}")
+            return
+
         # Parse extensions from query params and store in thread-local
         extensions = self._parse_extensions(self.path)
         setattr(self.mcp_server._enabled_extensions, "data", extensions)
+        setattr(self.mcp_server._transport_session_id, "data", f"sse:{session_id}")
 
-        # Dispatch to MCP registry
-        setattr(self.mcp_server._protocol_version, "data", "2024-11-05")
-        response = self.mcp_server.registry.dispatch(body)
+        try:
+            # Dispatch to MCP registry
+            setattr(self.mcp_server._protocol_version, "data", "2024-11-05")
+            response = self.mcp_server.registry.dispatch(body)
+        finally:
+            setattr(self.mcp_server._enabled_extensions, "data", set())
+            setattr(self.mcp_server._protocol_version, "data", None)
+            setattr(self.mcp_server._transport_session_id, "data", None)
 
         # Send SSE response if necessary
         if response is not None:
-            sse_conn = self.mcp_server._sse_connections.get(session_id)
-            if sse_conn is None or not sse_conn.alive:
-                # No SSE connection found
-                self.send_error(400, f"No active SSE connection found for session {session_id}")
-                return
-
             # Send response via SSE event stream
             sse_conn.send_event("message", response)
 
@@ -233,18 +303,60 @@ class McpHttpRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _handle_mcp_post(self, body: bytes):
+        request_method: str | None = None
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                method = parsed.get("method")
+                if isinstance(method, str):
+                    request_method = method
+        except Exception:
+            pass
+
+        mcp_session_id = self.headers.get("Mcp-Session-Id")
+        if self.mcp_server.require_streamable_http_session:
+            if request_method == "initialize":
+                if mcp_session_id is None:
+                    mcp_session_id = str(uuid.uuid4())
+                self.mcp_server.register_http_session(mcp_session_id)
+            else:
+                if mcp_session_id is None:
+                    self.send_error(
+                        400,
+                        "Missing Mcp-Session-Id header. Call initialize first and "
+                        "reuse the returned Mcp-Session-Id.",
+                    )
+                    return
+                if not self.mcp_server.has_http_session(mcp_session_id):
+                    print(
+                        f"[MCP] Re-registering HTTP session {mcp_session_id} after reconnect"
+                    )
+                    self.mcp_server.register_http_session(mcp_session_id)
+
         # Parse extensions from query params and store in thread-local
         extensions = self._parse_extensions(self.path)
         setattr(self.mcp_server._enabled_extensions, "data", extensions)
+        setattr(
+            self.mcp_server._transport_session_id,
+            "data",
+            f"http:{mcp_session_id}" if mcp_session_id else "http:anonymous",
+        )
 
         # Dispatch to MCP registry
         setattr(self.mcp_server._protocol_version, "data", "2025-06-18")
-        response = self.mcp_server.registry.dispatch(body)
+        try:
+            response = self.mcp_server.registry.dispatch(body)
+        finally:
+            setattr(self.mcp_server._enabled_extensions, "data", set())
+            setattr(self.mcp_server._protocol_version, "data", None)
+            setattr(self.mcp_server._transport_session_id, "data", None)
 
         def send_response(status: int, body: bytes):
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if mcp_session_id is not None:
+                self.send_header("Mcp-Session-Id", mcp_session_id)
             self.send_cors_headers()
             self.end_headers()
             self.wfile.write(body)
@@ -270,9 +382,13 @@ class McpServer:
         self._server_thread: threading.Thread | None = None
         self._running = False
         self._sse_connections: dict[str, _McpSseConnection] = {}
+        self._http_sessions: set[str] = set()
+        self._http_sessions_lock = threading.Lock()
         self._protocol_version = threading.local()
+        self._transport_session_id = threading.local()
         self._enabled_extensions = threading.local()  # set[str] per request
         self._extensions_registry = extensions if extensions is not None else {}  # group -> set of tool names
+        self.require_streamable_http_session = False
 
         # Register MCP protocol methods with correct names
         self.registry = JsonRpcRegistry()
@@ -314,9 +430,20 @@ class McpServer:
             request_handler,
             bind_and_activate=False
         )
-        self._http_server.allow_reuse_address = True
-        if hasattr(self._http_server, "allow_reuse_port"):
-            self._http_server.allow_reuse_port = True
+        # Fast restarts: skip TCP TIME_WAIT so a port can be reused immediately
+        # after the server stops. On Windows, SO_REUSEADDR is dangerous (allows
+        # multiple processes to bind the same port silently), so we use
+        # SO_EXCLUSIVEADDRUSE instead, which still allows TIME_WAIT reuse but
+        # prevents port hijacking. On Unix, SO_REUSEADDR is the correct option.
+        import sys
+        if sys.platform == "win32":
+            import socket
+            self._http_server.allow_reuse_address = False
+            self._http_server.socket.setsockopt(
+                socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1  # type: ignore[attr-defined]
+            )
+        else:
+            self._http_server.allow_reuse_address = True
 
         # Set the MCPServer instance on the handler class
         setattr(self._http_server, "mcp_server", self)
@@ -392,12 +519,27 @@ class McpServer:
                 if not request:
                     continue
 
-                response = self.registry.dispatch(request)
+                setattr(self._transport_session_id, "data", "stdio:default")
+                try:
+                    response = self.registry.dispatch(request)
+                finally:
+                    setattr(self._transport_session_id, "data", None)
                 if response is not None:
                     stdout.write(json.dumps(response).encode("utf-8") + b"\n")
                     stdout.flush()
             except (BrokenPipeError, KeyboardInterrupt): # Client disconnected
                 break
+
+    def get_current_transport_session_id(self) -> str | None:
+        return getattr(self._transport_session_id, "data", None)
+
+    def register_http_session(self, session_id: str) -> None:
+        with self._http_sessions_lock:
+            self._http_sessions.add(session_id)
+
+    def has_http_session(self, session_id: str) -> bool:
+        with self._http_sessions_lock:
+            return session_id in self._http_sessions
 
     def cors_localhost(self, origin: str) -> bool:
         """Allow CORS requests from localhost on ANY port."""
@@ -671,6 +813,9 @@ class McpServer:
 
     def _type_to_json_schema(self, py_type: Any) -> dict:
         """Convert Python type hint to JSON schema object"""
+        if py_type is Any:
+            return {}
+
         origin = get_origin(py_type)
         # Annotated[T, "description"]
         if origin is Annotated:

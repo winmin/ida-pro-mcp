@@ -85,6 +85,15 @@ class CommentOp(TypedDict):
     comment: Annotated[str, "Comment text"]
 
 
+class CommentAppendOp(TypedDict, total=False):
+    """Comment append operation"""
+
+    addr: Annotated[str, "Address (hex or decimal)"]
+    comment: Annotated[str, "Comment text to append"]
+    scope: Annotated[str, "auto|func|line (default: auto)"]
+    dedupe: Annotated[bool, "Skip if exact text already exists (default: true)"]
+
+
 class AsmPatchOp(TypedDict):
     """Assembly patch operation"""
 
@@ -109,7 +118,7 @@ class GlobalRename(TypedDict):
 class LocalRename(TypedDict):
     """Local variable rename operation"""
 
-    func_addr: Annotated[str, "Function address containing the local variable"]
+    func_addr: Annotated[str, "Function address"]
     old: Annotated[str, "Current variable name"]
     new: Annotated[str, "New variable name"]
 
@@ -117,7 +126,7 @@ class LocalRename(TypedDict):
 class StackRename(TypedDict):
     """Stack variable rename operation"""
 
-    func_addr: Annotated[str, "Function address containing the stack variable"]
+    func_addr: Annotated[str, "Function address"]
     old: Annotated[str, "Current variable name"]
     new: Annotated[str, "New variable name"]
 
@@ -138,6 +147,9 @@ class RenameBatch(TypedDict, total=False):
     stack: Annotated[
         list[StackRename] | StackRename | None, "Stack variable rename operations"
     ]
+    stop_on_error: Annotated[bool, "Stop on first failure"]
+    dry_run: Annotated[bool, "Validate only, no changes"]
+    allow_overwrite: Annotated[bool, "Force overwrite existing names"]
 
 
 class StructFieldQuery(TypedDict):
@@ -147,12 +159,124 @@ class StructFieldQuery(TypedDict):
     field: Annotated[str, "Field name"]
 
 
+class XrefQuery(TypedDict, total=False):
+    """Generic cross-reference query"""
+
+    query: Annotated[str, "Address or name"]
+    direction: Annotated[str, "to|from|both"]
+    xref_type: Annotated[str, "any|code|data"]
+    offset: Annotated[int, "Start index"]
+    count: Annotated[int, "Max results (max: 5000)"]
+    include_fn: Annotated[bool, "Include function metadata"]
+    dedup: Annotated[bool, "Deduplicate by addr/type"]
+    sort_by: Annotated[str, "Sort: addr|type"]
+    descending: Annotated[bool, "Descending"]
+
+
 class ListQuery(TypedDict, total=False):
     """Pagination query for listing operations"""
 
-    filter: Annotated[str, "Optional glob pattern to filter results"]
-    offset: Annotated[int, "Starting index (default: 0)"]
-    count: Annotated[int, "Maximum number of results (default: 50, 0 for all)"]
+    filter: Annotated[str, "Glob filter"]
+    offset: Annotated[int, "Start index"]
+    count: Annotated[int, "Max results (0=all)"]
+
+
+class FunctionQuery(TypedDict, total=False):
+    """Function query with richer filtering"""
+
+    filter: Annotated[str, "Name glob/regex"]
+    name_regex: Annotated[str, "Name regex"]
+    min_size: Annotated[int, "Min size in bytes"]
+    max_size: Annotated[int, "Max size in bytes"]
+    has_type: Annotated[bool, "Require type info"]
+    offset: Annotated[int, "Start index"]
+    count: Annotated[int, "Max results (0=all)"]
+    sort_by: Annotated[str, "Sort: addr|name|size"]
+    descending: Annotated[bool, "Descending"]
+
+
+class EntityQuery(TypedDict, total=False):
+    """Generic IDB entity query with filtering, projection, and pagination"""
+
+    kind: Annotated[str, "functions|globals|imports|strings|names"]
+    filter: Annotated[str, "Glob/regex filter"]
+    regex: Annotated[str, "Regex on primary text field"]
+    min_addr: Annotated[str, "Min address bound"]
+    max_addr: Annotated[str, "Max address bound"]
+    segment: Annotated[str, "Segment filter"]
+    module: Annotated[str, "Import module filter"]
+    offset: Annotated[int, "Start index"]
+    count: Annotated[int, "Max results (0=all)"]
+    sort_by: Annotated[str, "Sort: addr|name|size|length"]
+    descending: Annotated[bool, "Descending"]
+    fields: Annotated[list[str] | str, "Projection field list"]
+
+
+class FuncProfileQuery(TypedDict, total=False):
+    """Function profiling query with pagination and optional detail lists"""
+
+    query: Annotated[str, "Address/name or '*'"]
+    filter: Annotated[str, "Name glob/regex"]
+    offset: Annotated[int, "Start index"]
+    count: Annotated[int, "Max results (0=all)"]
+    sort_by: Annotated[str, "Sort: addr|name|size"]
+    descending: Annotated[bool, "Descending"]
+    include_lists: Annotated[bool, "Include callers/callees/strings/constants"]
+    max_items: Annotated[int, "Max items per list"]
+    include_prototype: Annotated[bool, "Include prototype"]
+
+
+class AnalyzeBatchQuery(TypedDict, total=False):
+    """Comprehensive function analysis request"""
+
+    query: Annotated[str, "Function address or name"]
+    include_decompile: Annotated[bool, "Include decompiler output"]
+    include_disasm: Annotated[bool, "Include disassembly"]
+    include_xrefs: Annotated[bool, "Include xrefs-to/from"]
+    include_callers: Annotated[bool, "Include callers"]
+    include_callees: Annotated[bool, "Include callees"]
+    include_strings: Annotated[bool, "Include strings"]
+    include_constants: Annotated[bool, "Include constants"]
+    include_basic_blocks: Annotated[bool, "Include basic blocks"]
+    include_proto: Annotated[bool, "Include prototype"]
+    max_disasm_insns: Annotated[int, "Max disasm instructions"]
+    max_callers: Annotated[int, "Max callers"]
+    max_callees: Annotated[int, "Max callees"]
+    max_strings: Annotated[int, "Max strings"]
+    max_constants: Annotated[int, "Max constants"]
+    max_blocks: Annotated[int, "Max blocks"]
+
+
+class ImportQuery(TypedDict, total=False):
+    """Import query with filtering and pagination"""
+
+    filter: Annotated[str, "Name glob/regex"]
+    module: Annotated[str, "Module glob/regex"]
+    offset: Annotated[int, "Start index"]
+    count: Annotated[int, "Max results (0=all)"]
+
+
+class TypeInspectQuery(TypedDict, total=False):
+    """Type inspection request"""
+
+    name: Annotated[str, "Type name"]
+    include_members: Annotated[bool, "Include UDT member details"]
+    max_members: Annotated[int, "Max members"]
+
+
+class TypeQuery(TypedDict, total=False):
+    """Type catalog query with filtering, pagination, and optional relationships"""
+
+    filter: Annotated[str, "Name glob/regex"]
+    kind: Annotated[str, "any|struct|union|enum|typedef|func|ptr|udt"]
+    offset: Annotated[int, "Start index"]
+    count: Annotated[int, "Max results (0=all)"]
+    sort_by: Annotated[str, "Sort: name|size|ordinal"]
+    descending: Annotated[bool, "Descending"]
+    include_decl: Annotated[bool, "Include declaration text"]
+    include_members: Annotated[bool, "Include UDT member details"]
+    max_members: Annotated[int, "Max members per UDT"]
+    include_relationships: Annotated[bool, "Include related type names"]
 
 
 class BreakpointOp(TypedDict):
@@ -165,22 +289,21 @@ class BreakpointOp(TypedDict):
 class InsnPattern(TypedDict, total=False):
     """Instruction pattern for operand search"""
 
-    mnem: Annotated[str, "Instruction mnemonic to match"]
-    op0: Annotated[int, "Value to match in first operand"]
-    op1: Annotated[int, "Value to match in second operand"]
-    op2: Annotated[int, "Value to match in third operand"]
-    op_any: Annotated[int, "Value to match in any operand"]
-    func: Annotated[str, "Function address to scope the scan"]
-    segment: Annotated[str, "Segment name to scope the scan"]
-    start: Annotated[str, "Start address (hex/dec) to scope the scan"]
-    end: Annotated[str, "End address (hex/dec, exclusive) to scope the scan"]
-    max_scan_insns: Annotated[
-        int, "Max instructions to scan (default: 200000, max: 2000000)"
-    ]
-    allow_broad: Annotated[
-        bool,
-        "Allow scans without scope (default: false). Use with care on large binaries.",
-    ]
+    mnem: Annotated[str, "Mnemonic to match"]
+    op0: Annotated[int, "Match first operand"]
+    op1: Annotated[int, "Match second operand"]
+    op2: Annotated[int, "Match third operand"]
+    op_any: Annotated[int, "Match any operand"]
+    func: Annotated[str, "Scope: function address"]
+    segment: Annotated[str, "Scope: segment name"]
+    start: Annotated[str, "Scope: start address"]
+    end: Annotated[str, "Scope: end address (exclusive)"]
+    offset: Annotated[int, "Start index"]
+    count: Annotated[int, "Max matches (max: 5000)"]
+    max_scan_insns: Annotated[int, "Max instructions to scan"]
+    include_fn: Annotated[bool, "Include function metadata"]
+    include_disasm: Annotated[bool, "Include disassembly text"]
+    allow_broad: Annotated[bool, "Allow scopeless scan"]
 
 
 class NumberConversion(TypedDict, total=False):
@@ -197,21 +320,41 @@ class StructRead(TypedDict, total=False):
     to auto-detect from type information already applied at the address.
     """
 
-    addr: Annotated[str, "Memory address (hex or decimal)"]
-    struct: Annotated[
-        NotRequired[str], "Structure name (optional, auto-detect if omitted)"
-    ]
+    addr: Annotated[str, "Address"]
+    struct: Annotated[NotRequired[str], "Struct name (auto-detect if omitted)"]
 
 
 class TypeEdit(TypedDict, total=False):
     """Type application operation"""
 
-    addr: Annotated[str, "Memory address"]
+    addr: Annotated[str, "Address"]
     name: Annotated[str, "Variable/function name"]
     ty: Annotated[str, "Type name or declaration"]
-    kind: Annotated[str, "Type of entity (auto-detected if omitted)"]
-    signature: Annotated[str, "Function signature (for kind=function)"]
-    variable: Annotated[str, "Local variable name (for kind=local)"]
+    kind: Annotated[str, "Entity kind (auto-detected)"]
+    signature: Annotated[str, "Function signature"]
+    variable: Annotated[str, "Local variable name"]
+
+
+class EnumMemberUpsert(TypedDict, total=False):
+    """Enum member upsert operation"""
+
+    name: Annotated[str, "Enum member name"]
+    value: Annotated[int | str, "Enum member value"]
+
+
+class EnumUpsert(TypedDict, total=False):
+    """Enum create/update operation"""
+
+    name: Annotated[str, "Enum type name"]
+    members: Annotated[list[EnumMemberUpsert] | EnumMemberUpsert, "Members to upsert"]
+    bitfield: Annotated[bool, "Bitfield enum"]
+
+
+class TypeApplyBatch(TypedDict, total=False):
+    """Batch type application configuration"""
+
+    edits: Annotated[list[TypeEdit] | TypeEdit, "Type edits to apply"]
+    stop_on_error: Annotated[bool, "Stop on first failure"]
 
 
 class StackVarDecl(TypedDict):
@@ -228,6 +371,23 @@ class StackVarDelete(TypedDict):
 
     addr: Annotated[str, "Function address"]
     name: Annotated[str, "Variable name"]
+
+
+class DefineOp(TypedDict, total=False):
+    """Define function/code operation"""
+
+    addr: Annotated[
+        str, "Address to define (hex or decimal). Use 'start:end' for explicit bounds."
+    ]
+    end: Annotated[str, "Optional end address for explicit bounds"]
+
+
+class UndefineOp(TypedDict, total=False):
+    """Undefine operation"""
+
+    addr: Annotated[str, "Address to undefine (hex or decimal)"]
+    end: Annotated[str, "Optional end address"]
+    size: Annotated[int, "Optional size in bytes"]
 
 
 # ============================================================================
@@ -308,9 +468,10 @@ class StackFrameVariable(TypedDict):
 class DisassemblyFunction(TypedDict):
     name: str
     start_ea: str
+    segment: NotRequired[str]
     return_type: NotRequired[str]
     arguments: NotRequired[list[Argument]]
-    stack_frame: list[StackFrameVariable]
+    stack_frame: NotRequired[list[StackFrameVariable]]
     lines: list[DisassemblyLine]
 
 
@@ -399,15 +560,11 @@ class Page(TypedDict, Generic[T]):
 
 
 def get_image_size() -> int:
-    try:
-        info = idaapi.get_inf_structure()
-        omin_ea = info.omin_ea
-        omax_ea = info.omax_ea
-    except AttributeError:
-        import ida_ida
+    from . import compat
 
-        omin_ea = ida_ida.inf_get_omin_ea()
-        omax_ea = ida_ida.inf_get_omax_ea()
+    omin_ea = compat.inf_get_omin_ea()
+    omax_ea = compat.inf_get_omax_ea()
+
     image_size = omax_ea - omin_ea
     header = idautils.peutils_t().header()
     if header and header[:4] == b"PE\0\0":
@@ -532,38 +689,33 @@ def get_function(addr: int, *, raise_error: Literal[False]) -> Optional[Function
 
 
 def get_function(addr, *, raise_error=True):
+    from . import compat
+
     fn = idaapi.get_func(addr)
     if fn is None:
         if raise_error:
             raise IDAError(f"No function found at address {hex(addr)}")
         return None
 
-    try:
-        name = fn.get_name()
-    except AttributeError:
-        name = ida_funcs.get_func_name(fn.start_ea)
+    name = compat.get_func_name(fn)
 
-    return Function(addr=hex(addr), name=name, size=hex(fn.end_ea - fn.start_ea))
+    return Function(addr=hex(fn.start_ea), name=name, size=hex(fn.end_ea - fn.start_ea))
 
 
 def get_prototype(fn: ida_funcs.func_t) -> Optional[str]:
+    from . import compat
+
+    prototype = compat.get_func_prototype(fn)
+    if prototype is not None:
+        return str(prototype)
+
+    # Fallback: try idc.get_type
     try:
-        prototype: ida_typeinf.tinfo_t = fn.get_prototype()
-        if prototype is not None:
-            return str(prototype)
-        else:
-            return None
-    except AttributeError:
-        try:
-            return idc.get_type(fn.start_ea)
-        except Exception:
-            tif = ida_typeinf.tinfo_t()
-            if ida_nalt.get_tinfo(tif, fn.start_ea):
-                return str(tif)
-            return None
-    except Exception as e:
-        print(f"Error getting function prototype: {e}")
-        return None
+        return idc.get_type(fn.start_ea)
+    except Exception:
+        pass
+
+    return None
 
 
 DEMANGLED_TO_EA = {}
@@ -632,6 +784,7 @@ def get_type_by_name(type_name: str) -> ida_typeinf.tinfo_t:
         "int64",
         "__int64",
         "int64_t",
+        "signed __int64",
         "long long",
         "long long int",
         "signed long long",
@@ -643,6 +796,7 @@ def get_type_by_name(type_name: str) -> ida_typeinf.tinfo_t:
         "__uint64",
         "uint64_t",
         "unsigned int64",
+        "unsigned __int64",
         "unsigned long long",
         "unsigned long long int",
         "qword",
@@ -683,7 +837,12 @@ def get_type_by_name(type_name: str) -> ida_typeinf.tinfo_t:
         return tif
     if tif.get_named_type(None, type_name, ida_typeinf.BTF_UNION):
         return tif
-    if tif := ida_typeinf.tinfo_t(type_name):
+
+    # Try parse_decl for arbitrary type expressions (works in IDA 9.0+)
+    tif = ida_typeinf.tinfo_t()
+    flags = ida_typeinf.PT_SIL | ida_typeinf.PT_TYP
+    candidate = type_name if type_name.endswith(";") else type_name + ";"
+    if ida_typeinf.parse_decl(tif, None, candidate, flags) is not None and not tif.empty():
         return tif
 
     raise IDAError(f"Unable to retrieve {type_name} type info object")
@@ -750,6 +909,8 @@ def pattern_filter(data: list[T], pattern: str, key: str) -> list[T]:
 
 
 def refresh_decompiler_widget():
+    if not ida_hexrays.init_hexrays_plugin():
+        return
     widget = ida_kernwin.get_current_widget()
     if widget is not None:
         vu = ida_hexrays.get_widget_vdui(widget)
@@ -758,6 +919,8 @@ def refresh_decompiler_widget():
 
 
 def refresh_decompiler_ctext(fn_addr: int):
+    if not ida_hexrays.init_hexrays_plugin():
+        return
     error = ida_hexrays.hexrays_failure_t()
     cfunc: ida_hexrays.cfunc_t = ida_hexrays.decompile_func(
         fn_addr, error, ida_hexrays.DECOMP_WARNINGS
@@ -888,9 +1051,11 @@ def decompile_function_safe(ea: int) -> Optional[str]:
         lines = []
         for sl in sv:
             sl: ida_kernwin.simpleline_t
+            _head = ida_hexrays.ctree_item_t()
             item = ida_hexrays.ctree_item_t()
+            _tail = ida_hexrays.ctree_item_t()
             line_ea = None
-            if cfunc.get_line_item(sl.line, 0, False, None, item, None):
+            if cfunc.get_line_item(sl.line, 0, False, _head, item, _tail):
                 dstr: str | None = item.dstr()
                 if dstr:
                     ds = dstr.split(": ")

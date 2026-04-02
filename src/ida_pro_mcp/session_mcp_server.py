@@ -642,7 +642,13 @@ class SessionMcpServer:
         self._port_counter = SESSION_PORT_START
         raise RuntimeError("No available ports for new session")
 
-    def _create_session(self, binary_path: str) -> Session:
+    def _create_session(
+        self,
+        binary_path: str,
+        live_notify_url: str | None = None,
+        notify_project_id: str | None = None,
+        notify_binary_id: str | None = None,
+    ) -> Session:
         """Create a new IDA session for a binary"""
         binary_path = os.path.abspath(binary_path)
 
@@ -665,6 +671,13 @@ class SessionMcpServer:
             session_id,
             binary_path,
         ]
+
+        if live_notify_url:
+            cmd.extend(["--live-notify-url", live_notify_url])
+        if notify_project_id:
+            cmd.extend(["--notify-project-id", notify_project_id])
+        if notify_binary_id:
+            cmd.extend(["--notify-binary-id", notify_binary_id])
 
         if self.unsafe:
             cmd.append("--unsafe")
@@ -815,9 +828,20 @@ class SessionMcpServer:
             logger.info(f"Destroyed session {session_id}")
             return True
 
-    def create_session(self, binary_path: str) -> dict:
+    def create_session(
+        self,
+        binary_path: str,
+        live_notify_url: str | None = None,
+        notify_project_id: str | None = None,
+        notify_binary_id: str | None = None,
+    ) -> dict:
         """Public wrapper around session creation."""
-        session = self._create_session(binary_path)
+        session = self._create_session(
+            binary_path,
+            live_notify_url=live_notify_url,
+            notify_project_id=notify_project_id,
+            notify_binary_id=notify_binary_id,
+        )
         return session.to_dict()
 
     def close_session(self, session_id: str) -> bool:

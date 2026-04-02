@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Annotated, Any, Optional, TypedDict
 
@@ -104,6 +105,48 @@ class IdalibWarmupResult(IdalibContextFields, total=False):
 
 logger = logging.getLogger(__name__)
 
+_MUTATING_TOOLS = {
+    'rename',
+    'set_comments',
+    'patch',
+    'patch_asm',
+    'put_int',
+    'dbg_write',
+    'declare_type',
+    'set_type',
+    'declare_stack',
+    'delete_stack',
+}
+
+_LIVE_NOTIFY_URL: str | None = None
+_NOTIFY_PROJECT_ID: str | None = None
+_NOTIFY_BINARY_ID: str | None = None
+_NOTIFY_SESSION_ID: str | None = None
+
+
+def _post_live_notify(tool_name: str, arguments: Optional[dict] = None) -> None:
+    if not _LIVE_NOTIFY_URL:
+        return
+    payload = {
+        'event': 'external_mcp_write',
+        'operation_type': tool_name,
+        'project_id': _NOTIFY_PROJECT_ID,
+        'binary_id': _NOTIFY_BINARY_ID,
+        'runtime_session_id': _NOTIFY_SESSION_ID,
+        'target': (arguments or {}).get('addr') or (arguments or {}).get('name') or tool_name,
+    }
+    try:
+        req = urllib.request.Request(
+            _LIVE_NOTIFY_URL,
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        urllib.request.urlopen(req, timeout=2).read()
+    except Exception as exc:
+        logger.debug('live notify failed for %s: %s', tool_name, exc)
+
+
 STDIO_DEFAULT_CONTEXT_ID = "stdio:default"
 SHARED_FALLBACK_CONTEXT_ID = "shared:fallback"
 IDALIB_MANAGEMENT_TOOLS = {
@@ -165,7 +208,10 @@ def _install_context_activation_hooks() -> None:
                     "content": [{"type": "text", "text": str(e)}],
                     "isError": True,
                 }
-        return original_tools_call(name, arguments, _meta)
+        result = original_tools_call(name, arguments, _meta)
+        if name in _MUTATING_TOOLS and not result.get('isError'):
+            _post_live_notify(name, arguments)
+        return result
 
     MCP_SERVER.registry.methods["tools/call"] = tools_call_with_context
 
@@ -507,6 +553,24 @@ def main():
         help="Optional session identifier for the initial database",
     )
     parser.add_argument(
+        "--live-notify-url",
+        type=str,
+        default=None,
+        help="Optional webhook to notify after mutating MCP tool calls",
+    )
+    parser.add_argument(
+        "--notify-project-id",
+        type=str,
+        default=None,
+        help="Project id for live notifications",
+    )
+    parser.add_argument(
+        "--notify-binary-id",
+        type=str,
+        default=None,
+        help="Binary id for live notifications",
+    )
+    parser.add_argument(
         "input_path",
         type=Path,
         nargs="?",
@@ -524,8 +588,12 @@ def main():
     logging.basicConfig(level=log_level)
     logging.getLogger().setLevel(log_level)
 
-    global _ISOLATED_CONTEXTS_ENABLED
+    global _ISOLATED_CONTEXTS_ENABLED, _LIVE_NOTIFY_URL, _NOTIFY_PROJECT_ID, _NOTIFY_BINARY_ID, _NOTIFY_SESSION_ID
     _ISOLATED_CONTEXTS_ENABLED = args.isolated_contexts
+    _LIVE_NOTIFY_URL = args.live_notify_url
+    _NOTIFY_PROJECT_ID = args.notify_project_id
+    _NOTIFY_BINARY_ID = args.notify_binary_id
+    _NOTIFY_SESSION_ID = args.session_id
 
     mode = "isolated-contexts" if _ISOLATED_CONTEXTS_ENABLED else "shared-fallback"
     logger.info("idalib session mode: %s", mode)

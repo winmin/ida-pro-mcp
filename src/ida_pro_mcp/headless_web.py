@@ -1569,10 +1569,11 @@ window.addEventListener('load', async () => {
 
 
 class HeadlessWebBackend:
-    def __init__(self, db_path: Path, unsafe: bool = False, verbose: bool = False, notifier: LiveUpdateHub | None = None):
+    def __init__(self, db_path: Path, unsafe: bool = False, verbose: bool = False, notifier: LiveUpdateHub | None = None, notify_api_url: str | None = None):
         self.store = HeadlessProjectStore(db_path)
         self.sessions = SessionMcpServer(unsafe=unsafe, verbose=verbose)
         self.notifier = notifier
+        self.notify_api_url = notify_api_url
 
     def shutdown(self) -> None:
         self.sessions.cleanup()
@@ -1727,7 +1728,12 @@ class HeadlessWebBackend:
         open_path = binary.get('idb_path') or binary['binary_path']
         if binary.get('idb_path') and not Path(str(binary['idb_path'])).exists():
             open_path = binary['binary_path']
-        session = self.sessions.create_session(str(open_path))
+        session = self.sessions.create_session(
+            str(open_path),
+            live_notify_url=self.notify_api_url,
+            notify_project_id=binary['project_id'],
+            notify_binary_id=binary_id,
+        )
         self.store.record_session_open(
             project_id=binary['project_id'],
             binary_id=binary_id,
@@ -2340,7 +2346,14 @@ def main() -> None:
     notifier = LiveUpdateHub(args.host, ws_port)
     notifier.start()
 
-    backend = HeadlessWebBackend(args.db, unsafe=args.unsafe, verbose=args.verbose, notifier=notifier)
+    notify_api_url = f'http://{args.host}:{args.port}/api/live/notify'
+    backend = HeadlessWebBackend(
+        args.db,
+        unsafe=args.unsafe,
+        verbose=args.verbose,
+        notifier=notifier,
+        notify_api_url=notify_api_url,
+    )
     atexit.register(backend.shutdown)
 
     if args.artifact:

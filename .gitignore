@@ -36,3 +36,6 @@ scalene-profile.json
 
 # MCP config
 .mcp.json
+
+# Headless manager data
+.ida-headless/

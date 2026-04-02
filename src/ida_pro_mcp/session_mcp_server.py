@@ -815,6 +815,70 @@ class SessionMcpServer:
             logger.info(f"Destroyed session {session_id}")
             return True
 
+    def create_session(self, binary_path: str) -> dict:
+        """Public wrapper around session creation."""
+        session = self._create_session(binary_path)
+        return session.to_dict()
+
+    def close_session(self, session_id: str) -> bool:
+        """Public wrapper around session destruction."""
+        return self._destroy_session(session_id)
+
+    def list_session_records(self) -> list[dict]:
+        """Return current live session metadata."""
+        with self._lock:
+            records = []
+            for session in self.sessions.values():
+                record = session.to_dict()
+                record["is_active"] = session.session_id == self.active_session_id
+                records.append(record)
+            return records
+
+    def call_tool(
+        self, tool_name: str, arguments: Optional[dict] = None, session_id: Optional[str] = None
+    ) -> Any:
+        """Invoke an upstream IDA MCP tool on a specific live session."""
+        arguments = dict(arguments or {})
+        target_id = session_id or arguments.pop("session_id", None) or self.active_session_id
+        if target_id is None:
+            raise RuntimeError("No active session. Create a session first.")
+
+        with self._lock:
+            session = self.sessions.get(target_id)
+            if session is None:
+                raise KeyError(f"Session not found: {target_id}")
+            if session.status != "ready":
+                raise RuntimeError(
+                    f"Session {target_id} is not ready (status: {session.status})"
+                )
+            port = session.port
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=120)
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": arguments},
+            }
+            conn.request("POST", "/mcp", json.dumps(payload), {"Content-Type": "application/json"})
+            response = conn.getresponse()
+            data = json.loads(response.read().decode())
+        finally:
+            conn.close()
+
+        if "error" in data:
+            raise RuntimeError(data["error"].get("message", "Unknown JSON-RPC error"))
+
+        result = data.get("result", {})
+        if result.get("isError"):
+            content = result.get("content", [])
+            if content:
+                raise RuntimeError(content[0].get("text", "Unknown tool error"))
+            raise RuntimeError("Unknown tool error")
+
+        return result.get("structuredContent")
+
     def cleanup(self):
         """Clean up all sessions, saving IDBs before termination"""
         session_ids = list(self.sessions.keys())

@@ -899,7 +899,7 @@ function extractTextBlock(value) {
   if (current == null) return 'No data.';
   if (typeof current === 'string') return current;
   if (Array.isArray(current)) {
-    if (current.every((item) => typeof item === 'string')) return current.join('\n');
+    if (current.every((item) => typeof item === 'string')) return current.join('\\n');
     return current.map((item) => {
       if (typeof item === 'string') return item;
       if (item.line) return item.line;
@@ -907,26 +907,26 @@ function extractTextBlock(value) {
       if (item.disasm) return item.disasm;
       if (item.address || item.addr) return `${item.address || item.addr} ${item.text || item.disasm || ''}`.trim();
       return prettyJson(item);
-    }).join('\n');
+    }).join('\\n');
   }
   if (typeof current === 'object') {
     if (typeof current.code === 'string') return current.code;
-    if (Array.isArray(current.pseudocode)) return current.pseudocode.join('\n');
+    if (Array.isArray(current.pseudocode)) return current.pseudocode.join('\\n');
     if (typeof current.pseudocode === 'string') return current.pseudocode;
     if (Array.isArray(current.lines)) {
-      return current.lines.map((line) => typeof line === 'string' ? line : (line.line || line.text || prettyJson(line))).join('\n');
+      return current.lines.map((line) => typeof line === 'string' ? line : (line.line || line.text || prettyJson(line))).join('\\n');
     }
     if (current.asm && Array.isArray(current.asm.lines)) {
       return current.asm.lines
         .map((line) => `${line.addr || ''} ${line.instruction || line.text || ''}`.trim())
-        .join('\n');
+        .join('\\n');
     }
     if (Array.isArray(current.instructions)) {
       return current.instructions.map((insn) => {
         const addr = insn.address || insn.addr || insn.ea || '';
         const text = insn.text || insn.disasm || [insn.mnemonic, insn.operands].filter(Boolean).join(' ');
         return `${addr} ${text}`.trim();
-      }).join('\n');
+      }).join('\\n');
     }
     if (typeof current.text === 'string') return current.text;
   }

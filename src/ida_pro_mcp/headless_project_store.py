@@ -13,12 +13,11 @@ def utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _json_load(blob: str | None) -> dict[str, Any]:
+def _json_load(blob: str | None) -> Any:
     if not blob:
         return {}
     try:
-        value = json.loads(blob)
-        return value if isinstance(value, dict) else {}
+        return json.loads(blob)
     except Exception:
         return {}
 
@@ -162,6 +161,26 @@ class HeadlessProjectStore:
                     structs_refreshed_at TEXT,
                     FOREIGN KEY(binary_id) REFERENCES binaries(binary_id) ON DELETE CASCADE
                 );
+
+                CREATE TABLE IF NOT EXISTS operation_history (
+                    operation_id TEXT PRIMARY KEY,
+                    project_id TEXT,
+                    binary_id TEXT,
+                    runtime_session_id TEXT,
+                    operation_type TEXT NOT NULL,
+                    target TEXT,
+                    payload_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE SET NULL,
+                    FOREIGN KEY(binary_id) REFERENCES binaries(binary_id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_operation_history_binary_id
+                ON operation_history(binary_id, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_operation_history_session_id
+                ON operation_history(runtime_session_id, created_at DESC);
                 '''
             )
 
@@ -392,6 +411,85 @@ class HeadlessProjectStore:
             ).fetchone()
         return self._row_to_session(row) if row else None
 
+    def record_operation(
+        self,
+        operation_type: str,
+        payload: dict[str, Any] | list[Any] | None,
+        result: dict[str, Any] | list[Any] | None,
+        *,
+        project_id: str | None = None,
+        binary_id: str | None = None,
+        runtime_session_id: str | None = None,
+        target: str | None = None,
+    ) -> dict[str, Any]:
+        operation_id = uuid.uuid4().hex[:16]
+        created_at = utcnow_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operation_history(
+                    operation_id, project_id, binary_id, runtime_session_id,
+                    operation_type, target, payload_json, result_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    operation_id,
+                    project_id,
+                    binary_id,
+                    runtime_session_id,
+                    operation_type,
+                    target,
+                    json.dumps(payload or {}),
+                    json.dumps(result or {}),
+                    created_at,
+                ),
+            )
+        return self.get_operation(operation_id) or {
+            "operation_id": operation_id,
+            "created_at": created_at,
+        }
+
+    def list_operations(
+        self,
+        *,
+        project_id: str | None = None,
+        binary_id: str | None = None,
+        runtime_session_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses = []
+        params: list[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if binary_id:
+            clauses.append("binary_id = ?")
+            params.append(binary_id)
+        if runtime_session_id:
+            clauses.append("runtime_session_id = ?")
+            params.append(runtime_session_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM operation_history
+                {where}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._row_to_operation(row) for row in rows]
+
+    def get_operation(self, operation_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM operation_history WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        return self._row_to_operation(row) if row else None
+
     def replace_function_index(self, binary_id: str, items: list[dict[str, Any]]) -> None:
         refreshed_at = utcnow_iso()
         with self._connect() as conn:
@@ -587,6 +685,19 @@ class HeadlessProjectStore:
             'updated_at': row['updated_at'],
             'ended_at': row['ended_at'],
             'metadata': _json_load(row['metadata_json']),
+        }
+
+    def _row_to_operation(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "operation_id": row["operation_id"],
+            "project_id": row["project_id"],
+            "binary_id": row["binary_id"],
+            "runtime_session_id": row["runtime_session_id"],
+            "operation_type": row["operation_type"],
+            "target": row["target"],
+            "payload": _json_load(row["payload_json"]),
+            "result": _json_load(row["result_json"]),
+            "created_at": row["created_at"],
         }
 
     @staticmethod

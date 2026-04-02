@@ -63,8 +63,10 @@ pre { white-space: pre-wrap; word-break: break-word; background: #0b1220; paddin
       <div class="row">
         <input id="binaryPath" style="min-width:320px" placeholder="/path/to/binary or .i64">
         <button onclick="addBinary()">Add Binary</button>
+        <button onclick="restoreArtifact()">Restore Artifact</button>
         <button onclick="openSession()">Start Session</button>
         <button onclick="refreshIndexes()">Refresh Indexes</button>
+        <button onclick="loadHistory()">History</button>
         <button onclick="refreshAll()">Refresh</button>
       </div>
       <div class="small" id="selectionLabel">No binary selected</div>
@@ -120,6 +122,13 @@ pre { white-space: pre-wrap; word-break: break-word; background: #0b1220; paddin
         <input id="readStructAddr" placeholder="read struct addr">
         <input id="readStructName" placeholder="struct name (optional)">
         <button onclick="readStructView()">Read Struct</button>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <input id="structDeclName" placeholder="struct name">
+        <button onclick="declareStruct()">Declare/Update Struct</button>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <textarea id="structDeclBody" style="width:100%;min-height:120px" placeholder="int field1;&#10;char field2;&#10;void *field3;"></textarea>
       </div>
     </div>
     <div class="split">
@@ -221,6 +230,15 @@ async function addBinary() {
   await refreshAll();
 }
 
+async function restoreArtifact() {
+  if (!selectedProjectId) throw new Error('Select a project first');
+  const artifact_path = document.getElementById('binaryPath').value.trim();
+  const data = await api(`/api/projects/${selectedProjectId}/restore-artifact`, {method: 'POST', body: JSON.stringify({artifact_path})});
+  selectedBinaryId = data.binary.binary_id;
+  await refreshAll();
+  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+}
+
 async function openSession() {
   if (!selectedBinaryId) throw new Error('Select a binary first');
   const data = await api(`/api/binaries/${selectedBinaryId}/sessions`, {method: 'POST'});
@@ -259,6 +277,22 @@ async function refreshIndexes() {
   const data = await api(`/api/binaries/${selectedBinaryId}/refresh-indexes`, {method: 'POST'});
   if (data.session_id && !selectedSessionId) selectedSessionId = data.session_id;
   await refreshAll();
+  document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+}
+
+async function loadHistory() {
+  if (!selectedBinaryId) throw new Error('Select a binary first');
+  const data = await api(`/api/binaries/${selectedBinaryId}/history`);
+  renderBrowser(
+    `History (${data.operations.length})`,
+    data.operations,
+    item => `<div><strong>${item.operation_type}</strong></div><div class="small mono">${item.created_at}</div><div class="small mono">${item.target || ''}</div>`,
+    item => {
+      document.getElementById('output').textContent = JSON.stringify(item, null, 2);
+      const maybeAddr = item.payload?.addr || item.payload?.target || '';
+      if (maybeAddr) setAddrInputs(maybeAddr);
+    }
+  );
   document.getElementById('output').textContent = JSON.stringify(data, null, 2);
 }
 
@@ -381,6 +415,15 @@ async function readStructView() {
   document.getElementById('output').textContent = JSON.stringify(res, null, 2);
 }
 
+async function declareStruct() {
+  if (!selectedSessionId) throw new Error('Select a session first');
+  const struct_name = document.getElementById('structDeclName').value.trim();
+  const body = document.getElementById('structDeclBody').value.trim();
+  const res = await api(`/api/sessions/${selectedSessionId}/declare-struct`, {method: 'POST', body: JSON.stringify({struct_name, body})});
+  document.getElementById('output').textContent = JSON.stringify(res, null, 2);
+  if (selectedBinaryId) await refreshAll();
+}
+
 refreshAll().catch(err => document.getElementById('output').textContent = String(err));
 </script>
 </body>
@@ -416,6 +459,33 @@ class HeadlessWebBackend:
             )
         return session
 
+    def _session_context(self, runtime_session_id: str) -> dict[str, Any]:
+        session = self.store.get_session(runtime_session_id)
+        if session is None:
+            raise KeyError(f'session not found: {runtime_session_id}')
+        return session
+
+    def _record_operation(
+        self,
+        operation_type: str,
+        *,
+        payload: dict[str, Any] | list[Any] | None,
+        result: dict[str, Any] | list[Any] | None,
+        project_id: str | None = None,
+        binary_id: str | None = None,
+        runtime_session_id: str | None = None,
+        target: str | None = None,
+    ) -> None:
+        self.store.record_operation(
+            operation_type,
+            payload,
+            result,
+            project_id=project_id,
+            binary_id=binary_id,
+            runtime_session_id=runtime_session_id,
+            target=target,
+        )
+
     def create_project(self, payload: dict[str, Any]) -> dict[str, Any]:
         name = (payload.get('name') or '').strip()
         if not name:
@@ -429,9 +499,28 @@ class HeadlessWebBackend:
             raise ValueError('binary_path is required')
         return {'binary': self.store.add_binary(project_id, binary_path, payload.get('display_name'))}
 
+    def restore_artifact(self, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        artifact_path = payload.get('artifact_path') or payload.get('binary_path')
+        if not artifact_path:
+            raise ValueError('artifact_path is required')
+        binary = self.store.add_binary(project_id, artifact_path, payload.get('display_name'))
+        result = {'binary': binary, 'restored': True}
+        self._record_operation(
+            'restore_artifact',
+            payload=payload,
+            result=result,
+            project_id=project_id,
+            binary_id=binary['binary_id'],
+            target=str(artifact_path),
+        )
+        return result
+
     def open_session(self, binary_id: str) -> dict[str, Any]:
         binary = self._require_binary(binary_id)
-        session = self.sessions.create_session(binary['binary_path'])
+        open_path = binary.get('idb_path') or binary['binary_path']
+        if binary.get('idb_path') and not Path(str(binary['idb_path'])).exists():
+            open_path = binary['binary_path']
+        session = self.sessions.create_session(str(open_path))
         self.store.record_session_open(
             project_id=binary['project_id'],
             binary_id=binary_id,
@@ -439,19 +528,41 @@ class HeadlessWebBackend:
             worker_port=session.get('port'),
             worker_pid=session.get('pid'),
             status=session.get('status', 'ready'),
-            metadata={'binary_path': binary['binary_path']},
+            metadata={'binary_path': binary['binary_path'], 'open_path': str(open_path)},
         )
         idb_path = Path(binary['binary_path'])
         if idb_path.suffix.lower() not in {'.i64', '.idb'}:
             idb_path = idb_path.with_suffix('.i64')
         self.store.update_binary_idb_path(binary_id, idb_path)
-        return {'session': self.store.get_session(session['session_id']), 'live': session}
+        result = {'session': self.store.get_session(session['session_id']), 'live': session}
+        self._record_operation(
+            'open_session',
+            payload={'binary_id': binary_id, 'open_path': str(open_path)},
+            result=result,
+            project_id=binary['project_id'],
+            binary_id=binary_id,
+            runtime_session_id=session['session_id'],
+            target=str(open_path),
+        )
+        return result
 
     def close_session(self, runtime_session_id: str) -> dict[str, Any]:
+        session = self.store.get_session(runtime_session_id)
         ok = self.sessions.close_session(runtime_session_id)
         if ok:
             self.store.record_session_close(runtime_session_id)
-        return {'ok': ok, 'session_id': runtime_session_id}
+        result = {'ok': ok, 'session_id': runtime_session_id}
+        if session is not None:
+            self._record_operation(
+                'close_session',
+                payload={'runtime_session_id': runtime_session_id},
+                result=result,
+                project_id=session['project_id'],
+                binary_id=session['binary_id'],
+                runtime_session_id=runtime_session_id,
+                target=runtime_session_id,
+            )
+        return result
 
     def list_sessions(self) -> dict[str, Any]:
         live_map = {s['session_id']: s for s in self.sessions.list_session_records()}
@@ -463,6 +574,14 @@ class HeadlessWebBackend:
     def session_tool(self, runtime_session_id: str, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         result = self.sessions.call_tool(tool_name, arguments, session_id=runtime_session_id)
         return {'session_id': runtime_session_id, 'tool': tool_name, 'result': result}
+
+    def list_history(self, binary_id: str, limit: int = 100) -> dict[str, Any]:
+        binary = self._require_binary(binary_id)
+        return {
+            'binary_id': binary_id,
+            'operations': self.store.list_operations(binary_id=binary_id, limit=limit),
+            'binary': binary,
+        }
 
     def list_strings(self, runtime_session_id: str, query: str, offset: int = 0, limit: int = 100) -> dict[str, Any]:
         return self.session_tool(runtime_session_id, 'find_regex', {'pattern': query or '.', 'offset': offset, 'limit': limit})
@@ -490,14 +609,36 @@ class HeadlessWebBackend:
         data = payload.get('data')
         if not addr or not data:
             raise ValueError('addr and data are required')
-        return self.session_tool(runtime_session_id, 'patch', {'patches': {'addr': addr, 'data': data}})
+        result = self.session_tool(runtime_session_id, 'patch', {'patches': {'addr': addr, 'data': data}})
+        ctx = self._session_context(runtime_session_id)
+        self._record_operation(
+            'patch_bytes',
+            payload=payload,
+            result=result,
+            project_id=ctx['project_id'],
+            binary_id=ctx['binary_id'],
+            runtime_session_id=runtime_session_id,
+            target=str(addr),
+        )
+        return result
 
     def patch_asm(self, runtime_session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         addr = payload.get('addr')
         asm = payload.get('asm')
         if not addr or not asm:
             raise ValueError('addr and asm are required')
-        return self.session_tool(runtime_session_id, 'patch_asm', {'items': {'addr': addr, 'asm': asm}})
+        result = self.session_tool(runtime_session_id, 'patch_asm', {'items': {'addr': addr, 'asm': asm}})
+        ctx = self._session_context(runtime_session_id)
+        self._record_operation(
+            'patch_asm',
+            payload=payload,
+            result=result,
+            project_id=ctx['project_id'],
+            binary_id=ctx['binary_id'],
+            runtime_session_id=runtime_session_id,
+            target=str(addr),
+        )
+        return result
 
     def apply_type(self, runtime_session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         addr = payload.get('addr')
@@ -521,7 +662,18 @@ class HeadlessWebBackend:
         elif kind == 'stack' and name:
             edit['name'] = name
 
-        return self.session_tool(runtime_session_id, 'set_type', {'edits': edit})
+        result = self.session_tool(runtime_session_id, 'set_type', {'edits': edit})
+        ctx = self._session_context(runtime_session_id)
+        self._record_operation(
+            'set_type',
+            payload=edit,
+            result=result,
+            project_id=ctx['project_id'],
+            binary_id=ctx['binary_id'],
+            runtime_session_id=runtime_session_id,
+            target=str(addr),
+        )
+        return result
 
     def read_struct(self, runtime_session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         addr = payload.get('addr')
@@ -531,7 +683,55 @@ class HeadlessWebBackend:
         query: dict[str, Any] = {'addr': addr}
         if struct_name:
             query['struct'] = struct_name
-        return self.session_tool(runtime_session_id, 'read_struct', {'queries': query})
+        result = self.session_tool(runtime_session_id, 'read_struct', {'queries': query})
+        ctx = self._session_context(runtime_session_id)
+        self._record_operation(
+            'read_struct',
+            payload=query,
+            result=result,
+            project_id=ctx['project_id'],
+            binary_id=ctx['binary_id'],
+            runtime_session_id=runtime_session_id,
+            target=str(addr),
+        )
+        return result
+
+    def declare_struct(self, runtime_session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        struct_name = (payload.get('struct_name') or '').strip()
+        body = (payload.get('body') or '').strip()
+        if not struct_name or not body:
+            raise ValueError('struct_name and body are required')
+
+        decls = payload.get('decls')
+        if not decls:
+            decls = f"struct {struct_name} {{\n{body}\n}};"
+
+        result = self.session_tool(runtime_session_id, 'declare_type', {'decls': decls})
+        ctx = self._session_context(runtime_session_id)
+        structs = self.sessions.call_tool(
+            'search_structs',
+            {'filter': struct_name},
+            session_id=runtime_session_id,
+        )
+        if isinstance(structs, list):
+            current = self.store.list_struct_index(ctx['binary_id'], '', 100000, 0)
+            merged = {item.get('name'): item for item in current}
+            for item in structs:
+                if item.get('name'):
+                    merged[item['name']] = item
+            self.store.replace_struct_index(ctx['binary_id'], list(merged.values()))
+
+        wrapped = {'decls': decls, 'result': result}
+        self._record_operation(
+            'declare_struct',
+            payload={'struct_name': struct_name, 'decls': decls},
+            result=wrapped,
+            project_id=ctx['project_id'],
+            binary_id=ctx['binary_id'],
+            runtime_session_id=runtime_session_id,
+            target=struct_name,
+        )
+        return wrapped
 
     def refresh_indexes(self, binary_id: str, runtime_session_id: str | None = None) -> dict[str, Any]:
         binary = self._require_binary(binary_id)
@@ -590,7 +790,7 @@ class HeadlessWebBackend:
             binary.get('idb_path') or Path(binary['binary_path']).with_suffix('.i64'),
         )
 
-        return {
+        result = {
             'binary_id': binary_id,
             'session_id': sid,
             'counts': {
@@ -600,6 +800,16 @@ class HeadlessWebBackend:
             },
             'index_state': self.store.get_binary_index_state(binary_id),
         }
+        self._record_operation(
+            'refresh_indexes',
+            payload={'binary_id': binary_id},
+            result=result,
+            project_id=binary['project_id'],
+            binary_id=binary_id,
+            runtime_session_id=sid,
+            target=binary.get('display_name') or binary['binary_path'],
+        )
+        return result
 
     def get_binary_indexes(self, binary_id: str) -> dict[str, Any]:
         binary = self._require_binary(binary_id)
@@ -640,18 +850,40 @@ class HeadlessWebBackend:
         new_name = payload.get('new_name')
         if not addr or not new_name:
             raise ValueError('addr and new_name are required')
-        return self.session_tool(
+        result = self.session_tool(
             runtime_session_id,
             'rename',
             {'batch': {'globals': [{'old': addr, 'new': new_name}]}}
         )
+        ctx = self._session_context(runtime_session_id)
+        self._record_operation(
+            'rename',
+            payload=payload,
+            result=result,
+            project_id=ctx['project_id'],
+            binary_id=ctx['binary_id'],
+            runtime_session_id=runtime_session_id,
+            target=str(addr),
+        )
+        return result
 
     def comment(self, runtime_session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         addr = payload.get('addr')
         comment = payload.get('comment')
         if not addr or not comment:
             raise ValueError('addr and comment are required')
-        return self.session_tool(runtime_session_id, 'set_comments', {'items': json.dumps([{'addr': addr, 'comment': comment}])})
+        result = self.session_tool(runtime_session_id, 'set_comments', {'items': json.dumps([{'addr': addr, 'comment': comment}])})
+        ctx = self._session_context(runtime_session_id)
+        self._record_operation(
+            'comment',
+            payload=payload,
+            result=result,
+            project_id=ctx['project_id'],
+            binary_id=ctx['binary_id'],
+            runtime_session_id=runtime_session_id,
+            target=str(addr),
+        )
+        return result
 
 
 class HeadlessApiHandler(BaseHTTPRequestHandler):
@@ -733,6 +965,16 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
+            if path.startswith('/api/binaries/') and path.endswith('/history'):
+                binary_id = path.split('/')[3]
+                self._json(
+                    200,
+                    self.backend.list_history(
+                        binary_id,
+                        int(query.get('limit', ['100'])[0]),
+                    ),
+                )
+                return
             if path.startswith('/api/sessions/') and path.endswith('/lookup'):
                 session_id = path.split('/')[3]
                 self._json(200, self.backend.lookup(session_id, query.get('query', [''])[0]))
@@ -769,6 +1011,10 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
             if path.startswith('/api/projects/') and path.endswith('/binaries'):
                 project_id = path.split('/')[3]
                 self._json(200, self.backend.add_binary(project_id, payload))
+                return
+            if path.startswith('/api/projects/') and path.endswith('/restore-artifact'):
+                project_id = path.split('/')[3]
+                self._json(200, self.backend.restore_artifact(project_id, payload))
                 return
             if path.startswith('/api/binaries/') and path.endswith('/sessions'):
                 binary_id = path.split('/')[3]
@@ -808,6 +1054,10 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
             if path.startswith('/api/sessions/') and path.endswith('/read-struct'):
                 session_id = path.split('/')[3]
                 self._json(200, self.backend.read_struct(session_id, payload))
+                return
+            if path.startswith('/api/sessions/') and path.endswith('/declare-struct'):
+                session_id = path.split('/')[3]
+                self._json(200, self.backend.declare_struct(session_id, payload))
                 return
             if path.startswith('/api/sessions/') and path.endswith('/tool'):
                 session_id = path.split('/')[3]

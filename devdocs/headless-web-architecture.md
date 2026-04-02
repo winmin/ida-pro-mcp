@@ -17,6 +17,7 @@
 - `src/ida_pro_mcp/headless_project_store.py`
   - SQLite-backed metadata store
   - persists projects, binaries, sessions
+  - persists operation history
   - treats `.i64/.idb` as the durable IDA database artifact
 - `src/ida_pro_mcp/headless_web.py`
   - lightweight web manager
@@ -32,6 +33,7 @@
 - `GET /api/projects`
 - `POST /api/projects`
 - `POST /api/projects/{project_id}/binaries`
+- `POST /api/projects/{project_id}/restore-artifact`
 - `GET /api/sessions`
 - `POST /api/binaries/{binary_id}/sessions`
 - `POST /api/binaries/{binary_id}/refresh-indexes`
@@ -39,6 +41,7 @@
 - `GET /api/binaries/{binary_id}/functions`
 - `GET /api/binaries/{binary_id}/strings`
 - `GET /api/binaries/{binary_id}/structs`
+- `GET /api/binaries/{binary_id}/history`
 - `GET /api/sessions/{id}/lookup`
 - `GET /api/sessions/{id}/strings`
 - `GET /api/sessions/{id}/decompile`
@@ -50,8 +53,8 @@
 - `POST /api/sessions/{id}/patch-asm`
 - `POST /api/sessions/{id}/set-type`
 - `POST /api/sessions/{id}/read-struct`
+- `POST /api/sessions/{id}/declare-struct`
 
 ## Next milestones
-1. richer struct editing APIs
-2. project import/export and session restore
-3. auth / RBAC / background job queue
+1. project import/export and session restore polish
+2. auth / RBAC / background job queue

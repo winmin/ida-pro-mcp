@@ -748,6 +748,7 @@ const state = {
   currentIndexState: null,
   currentResourceItems: [],
   loading: false,
+  lastLiveEvent: null,
 };
 let liveSocket = null;
 let liveRefreshTimer = null;
@@ -944,6 +945,7 @@ function renderInspector() {
     ['Address', item?.addr || '—'],
     ['Binary', binary?.display_name || '—'],
     ['Session', state.selectedSessionId || '—'],
+    ['Live event', state.lastLiveEvent ? `${state.lastLiveEvent.operation_type || state.lastLiveEvent.event} @ ${state.lastLiveEvent.target || '—'}` : '—'],
   ];
   document.getElementById('inspectorSummary').innerHTML = rows.map(([label, value]) => `
     <div class='label'>${escapeHtml(label)}</div>
@@ -1520,12 +1522,40 @@ function shouldHandleLiveEvent(payload) {
   return !payload.binary_id || payload.binary_id === state.selectedBinaryId || payload.project_id === state.selectedProjectId || payload.runtime_session_id === state.selectedSessionId;
 }
 
+function isStructuralOperation(op) {
+  return ['declare_type', 'declare_struct', 'set_type', 'delete_stack', 'declare_stack'].includes(op);
+}
+
+function isCodeViewOperation(op) {
+  return ['rename', 'set_type', 'set_comments', 'comment', 'patch', 'patch_asm', 'external_mcp_write'].includes(op) || isStructuralOperation(op);
+}
+
+function needsFullWorkspaceRefresh(op) {
+  return ['open_session', 'close_session', 'refresh_indexes', 'add_binary', 'restore_artifact'].includes(op);
+}
+
+function buildLiveStatus(payload) {
+  const op = payload.operation_type || payload.event || 'update';
+  const target = payload.target ? ` · ${payload.target}` : '';
+  return `Live update: ${op}${target}`;
+}
+
 function scheduleWorkspaceLiveRefresh(payload) {
   if (!shouldHandleLiveEvent(payload)) return;
+  state.lastLiveEvent = payload;
+  renderInspector();
   window.clearTimeout(liveRefreshTimer);
   liveRefreshTimer = window.setTimeout(async () => {
-    await refreshWorkspace();
-    if (state.selectedItem?.addr) {
+    const op = payload.operation_type || payload.event || 'update';
+
+    if (needsFullWorkspaceRefresh(op)) {
+      await refreshWorkspace();
+    } else {
+      await Promise.allSettled([loadIndexState(), refreshResourcePane()]);
+      renderInspector();
+    }
+
+    if (state.selectedItem?.addr && isCodeViewOperation(op)) {
       await Promise.allSettled([
         loadLookupDetails(state.selectedItem.addr),
         loadDecompiler(state.selectedItem.addr),
@@ -1533,7 +1563,16 @@ function scheduleWorkspaceLiveRefresh(payload) {
         loadXrefs(state.selectedItem.addr),
       ]);
     }
-    setStatus(`Live update: ${payload.operation_type || payload.event || 'update'}`);
+
+    if (state.selectedItem?.kind === 'struct' && isStructuralOperation(op)) {
+      await refreshResourcePane();
+    }
+
+    if (!state.selectedItem && payload.target) {
+      document.getElementById('detailsOutput').textContent = prettyJson(payload);
+    }
+
+    setStatus(buildLiveStatus(payload));
   }, 250);
 }
 

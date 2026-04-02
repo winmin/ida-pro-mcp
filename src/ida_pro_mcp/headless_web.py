@@ -4,15 +4,78 @@ import argparse
 import atexit
 import json
 import logging
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from websockets.sync.server import ServerConnection, serve
+
 from ida_pro_mcp.headless_project_store import HeadlessProjectStore
 from ida_pro_mcp.session_mcp_server import SessionMcpServer
 
 logger = logging.getLogger(__name__)
+
+
+class LiveUpdateHub:
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self._clients: set[ServerConnection] = set()
+        self._lock = threading.Lock()
+        self._server = None
+        self._thread: threading.Thread | None = None
+        self._ready = threading.Event()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name='headless-web-ws', daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=5)
+
+    def _run(self) -> None:
+        with serve(self._handler, self.host, self.port) as server:
+            self._server = server
+            self._ready.set()
+            logger.info('Live update websocket listening on ws://%s:%d/ws', self.host, self.port)
+            server.serve_forever()
+
+    def _handler(self, websocket: ServerConnection) -> None:
+        with self._lock:
+            self._clients.add(websocket)
+        try:
+            for _message in websocket:
+                pass
+        except Exception:
+            pass
+        finally:
+            with self._lock:
+                self._clients.discard(websocket)
+
+    def publish(self, payload: dict[str, Any]) -> None:
+        message = json.dumps(payload)
+        with self._lock:
+            clients = list(self._clients)
+        stale: list[ServerConnection] = []
+        for websocket in clients:
+            try:
+                websocket.send(message)
+            except Exception:
+                stale.append(websocket)
+        if stale:
+            with self._lock:
+                for websocket in stale:
+                    self._clients.discard(websocket)
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=1)
+
 
 DASHBOARD_HTML = """<!doctype html>
 <html lang='en'>
@@ -98,7 +161,11 @@ pre { margin:0; white-space:pre-wrap; word-break:break-word; font-family:var(--m
   </section>
 </main>
 <script>
+const LIVE_WS_PORT = __LIVE_WS_PORT__;
+const LIVE_WS_URL = LIVE_WS_PORT ? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:${LIVE_WS_PORT}/ws` : null;
 const dashState = { projects: [], sessions: [], selectedProjectId: null };
+let dashSocket = null;
+let dashRefreshTimer = null;
 function esc(v){ return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function setDashStatus(msg){ document.getElementById('dashStatus').textContent = msg; }
 async function api(path, options={}) {
@@ -155,6 +222,25 @@ function renderProjectDetail(){
 }
 function selectProject(projectId){ dashState.selectedProjectId = projectId; renderProjects(); renderProjectDetail(); }
 function openWorkspace(binaryId){ window.location.href = `/workspace/${binaryId}`; }
+function scheduleDashRefresh(reason) {
+  window.clearTimeout(dashRefreshTimer);
+  dashRefreshTimer = window.setTimeout(async () => {
+    await refreshDashboard();
+    if (reason) setDashStatus(`Live update: ${reason}`);
+  }, 220);
+}
+function connectDashLiveUpdates() {
+  if (!LIVE_WS_URL) return;
+  dashSocket = new WebSocket(LIVE_WS_URL);
+  dashSocket.onmessage = (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      scheduleDashRefresh(payload.operation_type || payload.event || 'update');
+    } catch (_err) {}
+  };
+  dashSocket.onclose = () => { window.setTimeout(connectDashLiveUpdates, 1500); };
+  dashSocket.onerror = () => dashSocket && dashSocket.close();
+}
 async function refreshDashboard(){
   const [projects, sessions] = await Promise.all([api('/api/projects'), api('/api/sessions')]);
   dashState.projects = projects.projects || [];
@@ -201,7 +287,7 @@ async function refreshIndexes(binaryId){
   setDashStatus('Indexes refreshed.');
 }
 window.addEventListener('load', async () => {
-  try { await refreshDashboard(); setDashStatus('Dashboard ready.'); } catch (err) { setDashStatus(err.message); }
+  try { connectDashLiveUpdates(); await refreshDashboard(); setDashStatus('Dashboard ready.'); } catch (err) { setDashStatus(err.message); }
 });
 </script>
 </body>
@@ -647,6 +733,8 @@ code, .mono { font-family: var(--mono); }
 
 <script>
 const INITIAL_BINARY_ID = __INITIAL_BINARY_ID__;
+const LIVE_WS_PORT = __LIVE_WS_PORT__;
+const LIVE_WS_URL = LIVE_WS_PORT ? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:${LIVE_WS_PORT}/ws` : null;
 const state = {
   initialBinaryId: INITIAL_BINARY_ID,
   projects: [],
@@ -661,6 +749,8 @@ const state = {
   currentResourceItems: [],
   loading: false,
 };
+let liveSocket = null;
+let liveRefreshTimer = null;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -1426,8 +1516,42 @@ async function commentSelected() {
   await refreshResourcePane();
 }
 
+function shouldHandleLiveEvent(payload) {
+  return !payload.binary_id || payload.binary_id === state.selectedBinaryId || payload.project_id === state.selectedProjectId || payload.runtime_session_id === state.selectedSessionId;
+}
+
+function scheduleWorkspaceLiveRefresh(payload) {
+  if (!shouldHandleLiveEvent(payload)) return;
+  window.clearTimeout(liveRefreshTimer);
+  liveRefreshTimer = window.setTimeout(async () => {
+    await refreshWorkspace();
+    if (state.selectedItem?.addr) {
+      await Promise.allSettled([
+        loadLookupDetails(state.selectedItem.addr),
+        loadDecompiler(state.selectedItem.addr),
+        loadDisasm(state.selectedItem.addr),
+        loadXrefs(state.selectedItem.addr),
+      ]);
+    }
+    setStatus(`Live update: ${payload.operation_type || payload.event || 'update'}`);
+  }, 250);
+}
+
+function connectWorkspaceLiveUpdates() {
+  if (!LIVE_WS_URL) return;
+  liveSocket = new WebSocket(LIVE_WS_URL);
+  liveSocket.onmessage = (event) => {
+    try {
+      scheduleWorkspaceLiveRefresh(JSON.parse(event.data));
+    } catch (_err) {}
+  };
+  liveSocket.onclose = () => { window.setTimeout(connectWorkspaceLiveUpdates, 1500); };
+  liveSocket.onerror = () => liveSocket && liveSocket.close();
+}
+
 window.addEventListener('load', async () => {
   try {
+    connectWorkspaceLiveUpdates();
     renderResourceButtons();
     setTab('decompile');
     renderInspector();
@@ -1445,12 +1569,20 @@ window.addEventListener('load', async () => {
 
 
 class HeadlessWebBackend:
-    def __init__(self, db_path: Path, unsafe: bool = False, verbose: bool = False):
+    def __init__(self, db_path: Path, unsafe: bool = False, verbose: bool = False, notifier: LiveUpdateHub | None = None):
         self.store = HeadlessProjectStore(db_path)
         self.sessions = SessionMcpServer(unsafe=unsafe, verbose=verbose)
+        self.notifier = notifier
 
     def shutdown(self) -> None:
         self.sessions.cleanup()
+        if self.notifier is not None:
+            self.notifier.stop()
+
+    def _publish_event(self, event: str, **payload: Any) -> None:
+        if self.notifier is None:
+            return
+        self.notifier.publish({'event': event, 'ts': time.time(), **payload})
 
     def ensure_project(self, name: str, root_dir: str | Path | None = None) -> dict[str, Any]:
         normalized = name.strip()
@@ -1530,6 +1662,14 @@ class HeadlessWebBackend:
             runtime_session_id=runtime_session_id,
             target=target,
         )
+        self._publish_event(
+            'operation',
+            operation_type=operation_type,
+            project_id=project_id,
+            binary_id=binary_id,
+            runtime_session_id=runtime_session_id,
+            target=target,
+        )
 
     @staticmethod
     def _unwrap_tool_result(value: Any) -> Any:
@@ -1542,13 +1682,29 @@ class HeadlessWebBackend:
         if not name:
             raise ValueError('name is required')
         root_dir = payload.get('root_dir') or str(Path.cwd())
-        return {'project': self.store.create_project(name, root_dir)}
+        result = {'project': self.store.create_project(name, root_dir)}
+        self._record_operation('create_project', payload=payload, result=result, project_id=result['project']['project_id'], target=result['project']['name'])
+        return result
 
     def add_binary(self, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         binary_path = payload.get('binary_path')
         if not binary_path:
             raise ValueError('binary_path is required')
-        return {'binary': self.store.add_binary(project_id, binary_path, payload.get('display_name'))}
+        result = {'binary': self.store.add_binary(project_id, binary_path, payload.get('display_name'))}
+        self._record_operation('add_binary', payload=payload, result=result, project_id=project_id, binary_id=result['binary']['binary_id'], target=result['binary']['display_name'])
+        return result
+
+    def notify_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+        event = (payload.get('event') or 'invalidate').strip() or 'invalidate'
+        self._publish_event(
+            event,
+            project_id=payload.get('project_id'),
+            binary_id=payload.get('binary_id'),
+            runtime_session_id=payload.get('runtime_session_id'),
+            operation_type=payload.get('operation_type'),
+            target=payload.get('target'),
+        )
+        return {'ok': True, 'event': event}
 
     def restore_artifact(self, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         artifact_path = payload.get('artifact_path') or payload.get('binary_path')
@@ -1965,9 +2121,16 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _dashboard_html(self) -> str:
+        return DASHBOARD_HTML.replace('__LIVE_WS_PORT__', str(self.ws_port))
+
     def _workspace_html(self, binary_id: str) -> str:
         self.backend._require_binary(binary_id)
-        return WORKSPACE_HTML.replace('__INITIAL_BINARY_ID__', json.dumps(binary_id))
+        return (
+            WORKSPACE_HTML
+            .replace('__INITIAL_BINARY_ID__', json.dumps(binary_id))
+            .replace('__LIVE_WS_PORT__', str(self.ws_port))
+        )
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get('Content-Length', '0'))
@@ -1981,7 +2144,7 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         try:
             if path == '/':
-                self._html(DASHBOARD_HTML)
+                self._html(self._dashboard_html())
                 return
             if path.startswith('/workspace/'):
                 binary_id = path.split('/')[2]
@@ -2142,6 +2305,9 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
                 session_id = path.split('/')[3]
                 self._json(200, self.backend.session_tool(session_id, payload['tool_name'], payload.get('arguments', {})))
                 return
+            if path == '/api/live/notify':
+                self._json(200, self.backend.notify_event(payload))
+                return
             self._json(404, {'error': f'unknown route: {path}'})
         except Exception as exc:
             logger.exception('POST %s failed', path)
@@ -2156,6 +2322,7 @@ def main() -> None:
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--db', type=Path, default=Path('.ida-headless/projects.sqlite3'))
+    parser.add_argument('--ws-port', type=int, default=None)
     parser.add_argument('--project-name', default='default')
     parser.add_argument('--artifact', action='append', default=[], help='Artifact (.i64/.idb/binary) to restore on startup; may be repeated')
     parser.add_argument('--open-session', action='store_true', help='Open a live session for startup artifacts')
@@ -2169,7 +2336,11 @@ def main() -> None:
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     )
 
-    backend = HeadlessWebBackend(args.db, unsafe=args.unsafe, verbose=args.verbose)
+    ws_port = args.ws_port if args.ws_port is not None else args.port + 1
+    notifier = LiveUpdateHub(args.host, ws_port)
+    notifier.start()
+
+    backend = HeadlessWebBackend(args.db, unsafe=args.unsafe, verbose=args.verbose, notifier=notifier)
     atexit.register(backend.shutdown)
 
     if args.artifact:
@@ -2186,7 +2357,7 @@ def main() -> None:
             boot['project']['name'],
         )
 
-    handler = type('BoundHeadlessApiHandler', (HeadlessApiHandler,), {'backend': backend})
+    handler = type('BoundHeadlessApiHandler', (HeadlessApiHandler,), {'backend': backend, 'ws_port': ws_port})
     server = ThreadingHTTPServer((args.host, args.port), handler)
     logger.info('Headless web manager listening on http://%s:%d', args.host, args.port)
     try:

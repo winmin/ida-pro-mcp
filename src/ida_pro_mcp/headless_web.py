@@ -1459,20 +1459,32 @@ function normalizeXrefBuckets(value) {
   }
 
   if (current && typeof current === 'object') {
+    if (Array.isArray(current.incoming) || Array.isArray(current.outgoing) || Array.isArray(current.callers) || Array.isArray(current.callees)) {
+      return {
+        to: current.incoming || [],
+        from: current.outgoing || [],
+        callers: current.callers || [],
+        callees: current.callees || [],
+        total: current.total || 0,
+        resolvedAddr: current.resolved_addr || null,
+      };
+    }
     if (Array.isArray(current.data)) {
       return {
         to: current.data.filter((item) => item.direction === 'to'),
         from: current.data.filter((item) => item.direction === 'from'),
+        callers: [],
+        callees: [],
         total: current.total,
         resolvedAddr: current.resolved_addr || current.query || null,
       };
     }
     if (Array.isArray(current.xrefs)) {
-      return {to: current.xrefs || [], from: []};
+      return {to: current.xrefs || [], from: [], callers: [], callees: []};
     }
   }
 
-  return {to: [], from: [], total: 0, resolvedAddr: null};
+  return {to: [], from: [], callers: [], callees: [], total: 0, resolvedAddr: null};
 }
 
 function xrefRowAddress(item, direction) {
@@ -1532,6 +1544,47 @@ function renderXrefGroup(title, direction, items, emptyText) {
   `;
 }
 
+function renderCallGroup(title, items, emptyText) {
+  if (!items.length) {
+    return `
+      <div class='panel' style='margin-bottom:10px;'>
+        <div class='panel-header'>
+          <div class='panel-title'>${escapeHtml(title)}</div>
+          <span class='badge'>0</span>
+        </div>
+        <div class='panel-body'>
+          <div class='empty'>${escapeHtml(emptyText)}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class='panel' style='margin-bottom:10px;'>
+      <div class='panel-header'>
+        <div class='panel-title'>${escapeHtml(title)}</div>
+        <span class='badge success'>${items.length}</span>
+      </div>
+      <div class='panel-body' style='padding:0;'>
+        ${items.map((item) => {
+          const encodedAddr = encodeURIComponent(item.addr || '');
+          const sites = Array.isArray(item.sites) && item.sites.length ? item.sites.slice(0, 3).join(', ') : '';
+          const details = sites ? `sites: ${sites}` : `${item.count || 1} edge(s)`;
+          return `
+            <div class='xref-item' data-jump-addr='${encodedAddr}'>
+              <div class='row' style='justify-content:space-between;'>
+                <span>${escapeHtml(item.name || item.addr || '—')}</span>
+                <span class='mono'>${escapeHtml(item.addr || '—')}</span>
+              </div>
+              <div class='small'>${escapeHtml(details)}</div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
 async function loadXrefs(addr) {
   const container = document.getElementById('xrefsList');
   if (!state.selectedSessionId || !addr) {
@@ -1543,11 +1596,15 @@ async function loadXrefs(addr) {
     const grouped = normalizeXrefBuckets(payload.result ?? payload);
     const incoming = grouped.to || [];
     const outgoing = grouped.from || [];
-    if (!incoming.length && !outgoing.length) {
+    const callers = grouped.callers || [];
+    const callees = grouped.callees || [];
+    if (!incoming.length && !outgoing.length && !callers.length && !callees.length) {
       container.innerHTML = `<div class='empty'>No xrefs for ${escapeHtml(addr)}.</div>`;
       return;
     }
     container.innerHTML = `
+      ${state.selectedItem?.kind === 'function' ? renderCallGroup('Callers', callers, 'No caller functions found.') : ''}
+      ${state.selectedItem?.kind === 'function' ? renderCallGroup('Callees', callees, 'No callee functions found.') : ''}
       ${renderXrefGroup('Incoming refs (to current)', 'to', incoming, 'No incoming references.')}
       ${renderXrefGroup('Outgoing refs (from current)', 'from', outgoing, 'No outgoing references.')}
     `;
@@ -1785,9 +1842,10 @@ class HeadlessWebBackend:
 
     @staticmethod
     def _unwrap_tool_result(value: Any) -> Any:
-        if isinstance(value, dict) and "result" in value and len(value) == 1:
-            return value["result"]
-        return value
+        current = value
+        while isinstance(current, dict) and "result" in current and len(current) == 1:
+            current = current["result"]
+        return current
 
     def create_project(self, payload: dict[str, Any]) -> dict[str, Any]:
         name = (payload.get('name') or '').strip()
@@ -1918,8 +1976,7 @@ class HeadlessWebBackend:
     def xrefs(self, runtime_session_id: str, addr: str, limit: int = 50) -> dict[str, Any]:
         if not addr:
             raise ValueError('addr is required')
-        return self.session_tool(
-            runtime_session_id,
+        xref_result = self._unwrap_tool_result(self.sessions.call_tool(
             'xref_query',
             {
                 'queries': {
@@ -1934,7 +1991,85 @@ class HeadlessWebBackend:
                     'descending': False,
                 }
             },
-        )
+            session_id=runtime_session_id,
+        ))
+        xref_entry = (xref_result or [{}])[0] if isinstance(xref_result, list) else (xref_result or {})
+        xref_rows = list(xref_entry.get('data') or [])
+        incoming = [row for row in xref_rows if row.get('direction') == 'to']
+        outgoing = [row for row in xref_rows if row.get('direction') == 'from']
+
+        callers_map: dict[str, dict[str, Any]] = {}
+        for row in incoming:
+            if row.get('type') != 'code':
+                continue
+            fn = row.get('fn') or {}
+            caller_addr = str(fn.get('addr') or row.get('from') or row.get('addr') or '')
+            if not caller_addr:
+                continue
+            caller = callers_map.setdefault(
+                caller_addr,
+                {
+                    'addr': caller_addr,
+                    'name': fn.get('name') or caller_addr,
+                    'sites': [],
+                    'count': 0,
+                },
+            )
+            site = str(row.get('from') or row.get('addr') or '')
+            if site and site not in caller['sites']:
+                caller['sites'].append(site)
+            caller['count'] = len(caller['sites'])
+
+        callees_map: dict[str, dict[str, Any]] = {}
+        resolved_addr = str(xref_entry.get('resolved_addr') or addr)
+        try:
+            callgraph = self._unwrap_tool_result(self.sessions.call_tool(
+                'callgraph',
+                {
+                    'roots': resolved_addr,
+                    'max_depth': 1,
+                    'max_nodes': max(limit + 1, 16),
+                    'max_edges': max(limit * 4, 32),
+                },
+                session_id=runtime_session_id,
+            ))
+            callgraph_entry = (callgraph or [{}])[0] if isinstance(callgraph, list) else (callgraph or {})
+            nodes = {
+                str(node.get('addr')): node
+                for node in (callgraph_entry.get('nodes') or [])
+                if isinstance(node, dict) and node.get('addr')
+            }
+            for edge in callgraph_entry.get('edges') or []:
+                if str(edge.get('from')) != resolved_addr:
+                    continue
+                callee_addr = str(edge.get('to') or '')
+                if not callee_addr:
+                    continue
+                node = nodes.get(callee_addr, {})
+                callee = callees_map.setdefault(
+                    callee_addr,
+                    {
+                        'addr': callee_addr,
+                        'name': node.get('name') or edge.get('name') or callee_addr,
+                        'count': 0,
+                    },
+                )
+                callee['count'] += 1
+        except Exception:
+            pass
+
+        return {
+            'session_id': runtime_session_id,
+            'tool': 'xref_query+callgraph',
+            'result': {
+                'resolved_addr': resolved_addr,
+                'incoming': incoming,
+                'outgoing': outgoing,
+                'callers': list(callers_map.values()),
+                'callees': list(callees_map.values()),
+                'total': len(xref_rows),
+            },
+        }
 
     def decompile(self, runtime_session_id: str, addr: str) -> dict[str, Any]:
         if not addr:

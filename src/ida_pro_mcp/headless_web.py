@@ -3373,6 +3373,8 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
+    if hasattr(signal, 'SIGHUP'):
+        signal.signal(signal.SIGHUP, _signal_handler)
 
     if args.artifact:
         boot = backend.bootstrap_artifacts(

@@ -804,6 +804,7 @@ class SessionMcpServer:
                 stderr=subprocess.STDOUT,
                 text=True,
                 env=self._build_worker_env(),
+                start_new_session=True,
             )
         except Exception as e:
             raise RuntimeError(f"Failed to start idalib: {e}")
@@ -1178,6 +1179,8 @@ def main():
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    if hasattr(signal, 'SIGHUP'):
+        signal.signal(signal.SIGHUP, signal_handler)
 
     try:
         if args.transport == "stdio":

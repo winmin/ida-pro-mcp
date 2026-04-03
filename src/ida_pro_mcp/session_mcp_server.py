@@ -270,16 +270,18 @@ class Session:
 class SessionMcpServer:
     """MCP Server with integrated session management"""
 
-    def __init__(self, unsafe: bool = False, verbose: bool = False):
+    def __init__(self, unsafe: bool = False, verbose: bool = False, disable_user_plugins: bool = True):
         self.mcp = McpServer("ida-pro-mcp-session")
         self.sessions: dict[str, Session] = {}
         self.processes: dict[str, subprocess.Popen] = {}
         self.active_session_id: Optional[str] = None
         self.unsafe = unsafe
         self.verbose = verbose
+        self.disable_user_plugins = disable_user_plugins
         self._lock = threading.Lock()
         self._port_counter = SESSION_PORT_START
         self._snapshot_root = (Path.cwd() / '.ida-session-snapshots').resolve()
+        self._headless_home_root = (Path.cwd() / '.ida-headless' / 'headless-home').resolve()
 
         # Load IDA tools: try cache first, fall back to AST extraction from source
         self._cached_ida_tools: Optional[list[dict]] = load_cached_tools()
@@ -653,6 +655,55 @@ class SessionMcpServer:
         shutil.copy2(source, destination)
         return str(destination)
 
+    def _build_worker_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        if not self.disable_user_plugins:
+            return env
+
+        real_user_dir = Path.home() / '.idapro'
+        ida_user_dir = self._headless_home_root / '.idapro'
+        if real_user_dir.exists():
+            shutil.copytree(
+                real_user_dir,
+                ida_user_dir,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns('plugins'),
+            )
+        for path in (ida_user_dir, ida_user_dir / 'plugins'):
+            path.mkdir(parents=True, exist_ok=True)
+        for plugin_entry in (ida_user_dir / 'plugins').iterdir():
+            if plugin_entry.is_dir():
+                shutil.rmtree(plugin_entry)
+            else:
+                plugin_entry.unlink()
+
+        env['IDAUSR'] = str(ida_user_dir)
+        env['IDA_PRO_MCP_HEADLESS_HOME'] = str(self._headless_home_root)
+        env['IDA_PRO_MCP_DISABLE_USER_PLUGINS'] = '1'
+
+        user_config = real_user_dir / 'ida-config.json'
+        isolated_config = ida_user_dir / 'ida-config.json'
+        if 'IDADIR' not in env:
+            try:
+                install_dir = None
+                for candidate in (isolated_config, user_config):
+                    if not candidate.exists():
+                        continue
+                    config_blob = json.loads(candidate.read_text())
+                    install_dir = config_blob.get('Paths', {}).get('ida-install-dir')
+                    if install_dir:
+                        if candidate == user_config:
+                            try:
+                                shutil.copy2(user_config, isolated_config)
+                            except OSError:
+                                pass
+                        break
+                if install_dir:
+                    env['IDADIR'] = install_dir
+            except Exception:
+                pass
+        return env
+
     def _find_available_port(self) -> int:
         """Find an available port for a new session"""
         for port in range(self._port_counter, SESSION_PORT_END):
@@ -739,6 +790,7 @@ class SessionMcpServer:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                env=self._build_worker_env(),
             )
         except Exception as e:
             raise RuntimeError(f"Failed to start idalib: {e}")
@@ -1041,6 +1093,11 @@ def main():
         "--unsafe", action="store_true", help="Enable unsafe functions (DANGEROUS)"
     )
     parser.add_argument(
+        "--allow-user-plugins",
+        action="store_true",
+        help="Allow loading user plugins from ~/.idapro in headless workers",
+    )
+    parser.add_argument(
         "--auth-token",
         type=str,
         default=os.environ.get("IDA_MCP_AUTH_TOKEN"),
@@ -1069,7 +1126,11 @@ def main():
         generate_tools_cache(args.generate_tools_cache, args.unsafe, args.verbose)
         return
 
-    server = SessionMcpServer(unsafe=args.unsafe, verbose=args.verbose)
+    server = SessionMcpServer(
+        unsafe=args.unsafe,
+        verbose=args.verbose,
+        disable_user_plugins=not args.allow_user_plugins,
+    )
     server.mcp.auth_token = args.auth_token
 
     _cleanup_done = False

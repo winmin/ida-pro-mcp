@@ -357,6 +357,22 @@ class HeadlessProjectStore:
                 (status, now, now, runtime_session_id),
             )
 
+    def update_session_metadata(self, runtime_session_id: str, metadata: dict[str, Any]) -> None:
+        current = self.get_session(runtime_session_id)
+        if current is None:
+            return
+        merged = dict(current.get('metadata') or {})
+        merged.update(metadata)
+        with self._connect() as conn:
+            conn.execute(
+                '''
+                UPDATE sessions
+                SET metadata_json = ?, updated_at = ?
+                WHERE runtime_session_id = ? AND ended_at IS NULL
+                ''',
+                (json.dumps(merged), utcnow_iso(), runtime_session_id),
+            )
+
     def list_sessions(self, include_closed: bool = False) -> list[dict[str, Any]]:
         where = '' if include_closed else 'WHERE s.ended_at IS NULL'
         with self._connect() as conn:

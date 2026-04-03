@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -204,20 +205,39 @@ function renderProjectDetail(){
   if (!binaries.length) { target.innerHTML = `<div class='empty'>Project has no binaries yet.</div>`; return; }
   target.innerHTML = binaries.map((binary) => {
     const live = liveSessionForBinary(binary.binary_id);
+    const activeSession = binary.active_session || live || null;
+    const snapshotInfo = activeSession?.session_mode === 'snapshot'
+      ? `<div class='small'>Snapshot: <span class='mono'>${esc(activeSession.snapshot_path || activeSession.metadata?.open_path || '')}</span></div>`
+      : '';
+    const reuseInfo = activeSession?.reuse_count ? `<span class='badge'>reused ${esc(activeSession.reuse_count)}x</span>` : '';
+    const snapshots = (binary.snapshots || []).slice(0, 3).map((snapshot) => `
+      <div class='small row' style='justify-content:space-between;'>
+        <span class='mono' title='${esc(snapshot.path)}'>${esc(snapshot.name)}</span>
+        <span class='row'>
+          <span class='badge ${snapshot.in_use ? 'success' : ''}'>${snapshot.in_use ? 'in use' : 'snapshot'}</span>
+          <button ${snapshot.in_use ? 'disabled' : ''} data-snapshot-path="${esc(snapshot.path)}" onclick="event.stopPropagation(); deleteSnapshot('${binary.binary_id}', this.dataset.snapshotPath)">Delete</button>
+        </span>
+      </div>`).join('');
     return `
       <div class='binary-card'>
         <div class='row' style='justify-content:space-between;align-items:flex-start;'>
           <div>
             <div><strong>${esc(binary.display_name)}</strong></div>
             <div class='small mono'>${esc(binary.idb_path || binary.binary_path)}</div>
+            ${snapshotInfo}
           </div>
-          <span class='badge ${live ? 'success' : ''}'>${live ? 'live' : 'idle'}</span>
+          <span class='badge ${live ? 'success' : ''}'>${live ? (activeSession?.session_mode === 'snapshot' ? 'snapshot live' : 'live') : 'idle'}</span>
+        </div>
+        <div class='row wrap' style='margin-top:8px;'>
+          <span class='badge'>${esc(binary.snapshot_count || 0)} snapshot</span>
+          ${reuseInfo}
         </div>
         <div class='actions'>
           <button onclick="openWorkspace('${binary.binary_id}')">Open Workspace</button>
           <button onclick="startSession('${binary.binary_id}')">Start Session</button>
           <button onclick="refreshIndexes('${binary.binary_id}')">Refresh Indexes</button>
         </div>
+        ${snapshots ? `<div class='stack' style='margin-top:10px;'>${snapshots}</div>` : ''}
       </div>`;
   }).join('');
 }
@@ -278,14 +298,19 @@ async function restoreArtifact(){
   setDashStatus('Artifact restored.');
 }
 async function startSession(binaryId){
-  await api(`/api/binaries/${binaryId}/sessions`, { method:'POST' });
+  const payload = await api(`/api/binaries/${binaryId}/sessions`, { method:'POST' });
   await refreshDashboard();
-  setDashStatus('Session started.');
+  setDashStatus(payload.reused ? 'Session reused.' : 'Session started.');
 }
 async function refreshIndexes(binaryId){
   await api(`/api/binaries/${binaryId}/refresh-indexes`, { method:'POST', body: '{}' });
   await refreshDashboard();
   setDashStatus('Indexes refreshed.');
+}
+async function deleteSnapshot(binaryId, snapshotPath){
+  await api(`/api/binaries/${binaryId}/snapshots`, { method:'DELETE', body: JSON.stringify({path: snapshotPath}) });
+  await refreshDashboard();
+  setDashStatus('Snapshot deleted.');
 }
 window.addEventListener('load', async () => {
   try { connectDashLiveUpdates(); await refreshDashboard(); setDashStatus('Dashboard ready.'); } catch (err) { setDashStatus(err.message); }
@@ -716,6 +741,13 @@ code, .mono { font-family: var(--mono); }
           </div>
         </section>
 
+        <section class='panel'>
+          <div class='panel-header'><div class='panel-title'>Snapshots</div></div>
+          <div class='panel-body'>
+            <div id='snapshotList' class='list'></div>
+          </div>
+        </section>
+
         <section class='panel fill'>
           <div class='panel-header'><div class='panel-title'>Details</div></div>
           <div class='panel-body' style='min-height:280px;'>
@@ -747,6 +779,7 @@ const state = {
   activeTab: 'decompile',
   selectedItem: null,
   currentIndexState: null,
+  currentSnapshots: [],
   currentResourceItems: [],
   loading: false,
   lastLiveEvent: null,
@@ -818,6 +851,19 @@ function prettyJson(value) {
   }
 }
 
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (!Number.isFinite(size) || size <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let current = size;
+  let unitIndex = 0;
+  while (current >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024;
+    unitIndex += 1;
+  }
+  return `${current.toFixed(current >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
 function findProject(projectId) {
   return state.projects.find((project) => project.project_id === projectId) || null;
 }
@@ -860,12 +906,21 @@ function renderWorkspaceMeta() {
   const project = selectedProject();
   const binary = selectedBinary();
   const session = selectedSessionRecord();
+  const metadata = session?.metadata || {};
+  const sessionMode = session?.session_mode || (metadata.snapshot_of ? 'snapshot' : session?.live ? 'primary' : 'idle');
   const items = [
     ['Project', project ? project.name : '—'],
     ['Binary', binary ? binary.display_name : '—'],
     ['Session', state.selectedSessionId || '—'],
+    ['Mode', session ? sessionMode : '—'],
     ['Path', binary ? (binary.idb_path || binary.binary_path) : '—'],
   ];
+  if (metadata.snapshot_of) {
+    items.push(['Snapshot Of', metadata.snapshot_of]);
+  }
+  if ((session?.reuse_count || 0) > 0) {
+    items.push(['Reuse Count', String(session.reuse_count)]);
+  }
   document.getElementById('workspaceMeta').innerHTML = items.map(([label, value]) => `
     <div class='summary-chip'>
       <div class='label'>${escapeHtml(label)}</div>
@@ -873,11 +928,11 @@ function renderWorkspaceMeta() {
     </div>
   `).join('');
   document.getElementById('selectionPill').textContent = binary
-    ? `${binary.display_name}${state.selectedSessionId ? ' · live' : ' · no session'}`
+    ? `${binary.display_name}${state.selectedSessionId ? ` · ${sessionMode}` : ' · no session'}`
     : 'No binary selected';
   const badge = document.getElementById('sessionBadge');
   if (session && session.live) {
-    badge.textContent = 'Live session';
+    badge.textContent = sessionMode === 'snapshot' ? 'Snapshot session' : 'Live session';
     badge.className = 'badge success';
   } else {
     badge.textContent = 'No live session';
@@ -910,14 +965,19 @@ function renderProjectTree() {
     for (const binary of project.binaries || []) {
       const isActive = binary.binary_id === state.selectedBinaryId;
       const hasLive = state.sessions.some((session) => session.binary_id === binary.binary_id && session.live);
+      const activeSession = binary.active_session || null;
       const binaryEl = document.createElement('div');
       binaryEl.className = `tree-binary${isActive ? ' active' : ''}`;
       binaryEl.innerHTML = `
         <div class='row' style='justify-content:space-between;'>
           <span>${escapeHtml(binary.display_name)}</span>
-          <span class='badge ${hasLive ? 'success' : ''}'>${hasLive ? 'live' : 'idle'}</span>
+          <span class='badge ${hasLive ? 'success' : ''}'>${hasLive ? (activeSession?.session_mode === 'snapshot' ? 'snapshot' : 'live') : 'idle'}</span>
         </div>
         <div class='small mono'>${escapeHtml(binary.idb_path || binary.binary_path)}</div>
+        <div class='row wrap' style='margin-top:6px;'>
+          <span class='badge'>${escapeHtml(binary.snapshot_count || 0)} snapshot</span>
+          ${(activeSession?.reuse_count || 0) > 0 ? `<span class='badge'>reused ${escapeHtml(activeSession.reuse_count)}x</span>` : ''}
+        </div>
       `;
       binaryEl.onclick = () => selectBinary(project.project_id, binary.binary_id);
       binariesWrap.appendChild(binaryEl);
@@ -945,14 +1005,22 @@ function renderInspector() {
   const binary = selectedBinary();
   const item = state.selectedItem;
   const ctx = selectedContext();
+  const session = selectedSessionRecord();
   const rows = [
     ['Kind', item?.kind || '—'],
     ['Name', item?.name || '—'],
     ['Address', item?.addr || '—'],
     ['Binary', binary?.display_name || '—'],
     ['Session', state.selectedSessionId || '—'],
+    ['Session mode', session?.session_mode || '—'],
     ['Live event', state.lastLiveEvent ? `${state.lastLiveEvent.operation_type || state.lastLiveEvent.event} @ ${state.lastLiveEvent.target || '—'}` : '—'],
   ];
+  if ((session?.reuse_count || 0) > 0) {
+    rows.push(['Reuse count', String(session.reuse_count)]);
+  }
+  if (session?.snapshot_of) {
+    rows.push(['Snapshot of', session.snapshot_of]);
+  }
   if (item?.kind === 'function' || ctx.kind === 'function') {
     rows.push(
       ['Prototype', ctx.prototype || '—'],
@@ -984,6 +1052,31 @@ function renderInspector() {
 
 function renderDetails(value) {
   document.getElementById('detailsOutput').textContent = prettyJson(value);
+}
+
+function renderSnapshots() {
+  const container = document.getElementById('snapshotList');
+  if (!state.selectedBinaryId) {
+    container.innerHTML = `<div class='empty'>Select a binary.</div>`;
+    return;
+  }
+  if (!state.currentSnapshots.length) {
+    container.innerHTML = `<div class='empty'>No snapshots for this binary.</div>`;
+    return;
+  }
+  container.innerHTML = state.currentSnapshots.map((snapshot) => `
+    <div class='list-item'>
+      <div class='row' style='justify-content:space-between;'>
+        <strong class='mono'>${escapeHtml(snapshot.name)}</strong>
+        <span class='badge ${snapshot.in_use ? 'success' : ''}'>${snapshot.in_use ? 'in use' : 'snapshot'}</span>
+      </div>
+      <div class='small mono'>${escapeHtml(snapshot.path)}</div>
+      <div class='row wrap' style='margin-top:8px;justify-content:space-between;'>
+        <span class='small'>${escapeHtml(snapshot.updated_at)} · ${escapeHtml(formatBytes(snapshot.size))}</span>
+        <button ${snapshot.in_use ? 'disabled' : ''} data-snapshot-path="${escapeHtml(snapshot.path)}" onclick="deleteSnapshotWorkspace(this.dataset.snapshotPath)">Delete</button>
+      </div>
+    </div>
+  `).join('');
 }
 
 function renderResourceButtons() {
@@ -1082,6 +1175,7 @@ async function refreshWorkspaceView() {
   renderResourceButtons();
   renderTabButtons();
   await loadIndexState();
+  await loadSnapshots();
   await refreshResourcePane();
 }
 
@@ -1094,6 +1188,17 @@ async function loadIndexState() {
   const payload = await api(`/api/binaries/${state.selectedBinaryId}/indexes`);
   state.currentIndexState = payload.index_state || null;
   renderIndexBadges();
+}
+
+async function loadSnapshots() {
+  if (!state.selectedBinaryId) {
+    state.currentSnapshots = [];
+    renderSnapshots();
+    return;
+  }
+  const payload = await api(`/api/binaries/${state.selectedBinaryId}/snapshots`);
+  state.currentSnapshots = payload.snapshots || [];
+  renderSnapshots();
 }
 
 async function createProject() {
@@ -1132,7 +1237,12 @@ async function openSession() {
   if (!state.selectedBinaryId) return setStatus('Select a binary first.', '', true);
   const payload = await api(`/api/binaries/${state.selectedBinaryId}/sessions`, {method: 'POST'});
   state.selectedSessionId = payload.session.runtime_session_id;
-  setStatus('Session started.', payload.session.runtime_session_id);
+  const modeMeta = payload.session?.session_mode === 'snapshot'
+    ? 'snapshot session'
+    : payload.reused
+      ? 'reused existing session'
+      : 'fresh session';
+  setStatus(payload.reused ? 'Session reused.' : 'Session started.', `${payload.session.runtime_session_id} · ${modeMeta}`);
   await refreshWorkspace();
   await refreshIndexes(true);
 }
@@ -1147,6 +1257,16 @@ async function refreshIndexes(quiet = false) {
   if (!quiet) {
     setStatus('Indexes refreshed.', `funcs ${payload.counts.functions} · strings ${payload.counts.strings} · structs ${payload.counts.structs}`);
   }
+  await refreshWorkspace();
+}
+
+async function deleteSnapshotWorkspace(snapshotPath) {
+  if (!state.selectedBinaryId) return;
+  await api(`/api/binaries/${state.selectedBinaryId}/snapshots`, {
+    method: 'DELETE',
+    body: JSON.stringify({path: snapshotPath}),
+  });
+  setStatus('Snapshot deleted.', snapshotPath);
   await refreshWorkspace();
 }
 
@@ -1824,9 +1944,9 @@ window.addEventListener('load', async () => {
 
 
 class HeadlessWebBackend:
-    def __init__(self, db_path: Path, unsafe: bool = False, verbose: bool = False, notifier: LiveUpdateHub | None = None, notify_api_url: str | None = None):
+    def __init__(self, db_path: Path, unsafe: bool = False, verbose: bool = False, notifier: LiveUpdateHub | None = None, notify_api_url: str | None = None, disable_user_plugins: bool = True):
         self.store = HeadlessProjectStore(db_path)
-        self.sessions = SessionMcpServer(unsafe=unsafe, verbose=verbose)
+        self.sessions = SessionMcpServer(unsafe=unsafe, verbose=verbose, disable_user_plugins=disable_user_plugins)
         self.notifier = notifier
         self.notify_api_url = notify_api_url
         self._reconcile_session_rows()
@@ -1904,6 +2024,66 @@ class HeadlessWebBackend:
             'binary_id': binary_id,
         }
 
+    def _snapshot_root_for_binary(self, binary_id: str) -> Path:
+        return self.store.db_path.parent / 'session_snapshots' / binary_id
+
+    def _list_snapshot_records(self, binary_id: str) -> list[dict[str, Any]]:
+        root = self._snapshot_root_for_binary(binary_id)
+        live_paths = {
+            self._normalized_path(record.get('binary_path'))
+            for record in self._live_runtime_map().values()
+            if record.get('binary_path')
+        }
+        items: list[dict[str, Any]] = []
+        if not root.exists():
+            return items
+        for path in sorted(root.glob('*'), key=lambda item: item.stat().st_mtime, reverse=True):
+            if not path.is_file() or path.suffix.lower() not in {'.i64', '.idb'}:
+                continue
+            stat = path.stat()
+            normalized = self._normalized_path(path)
+            sidecars = sorted(
+                sibling.name
+                for sibling in path.parent.glob(f'{path.stem}.*')
+                if sibling.name != path.name and sibling.is_file()
+            )
+            items.append({
+                'name': path.name,
+                'path': str(path),
+                'size': stat.st_size,
+                'updated_at': datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                'in_use': normalized in live_paths,
+                'sidecar_count': len(sidecars),
+                'sidecars': sidecars,
+            })
+        return items
+
+    def _enrich_session_record(self, item: dict[str, Any]) -> dict[str, Any]:
+        metadata = item.get('metadata') or {}
+        session_mode = 'snapshot' if metadata.get('snapshot_of') else 'primary'
+        reuse_count = int(metadata.get('reuse_count') or 0)
+        item['session_mode'] = session_mode
+        item['reuse_count'] = reuse_count
+        item['is_reused_session'] = reuse_count > 0
+        item['snapshot_path'] = metadata.get('open_path') if metadata.get('snapshot_of') else None
+        item['snapshot_of'] = metadata.get('snapshot_of')
+        return item
+
+    def _enrich_binary_record(self, binary: dict[str, Any]) -> dict[str, Any]:
+        snapshots = self._list_snapshot_records(binary['binary_id'])
+        binary['snapshots'] = snapshots
+        binary['snapshot_count'] = len(snapshots)
+        live = self._find_live_session_for_open_path(self._resolve_open_path(binary))
+        if live:
+            session = self._session_row_for_live_runtime(binary['binary_id'], live)
+            session = self._enrich_session_record(session)
+            binary['active_session'] = session
+            binary['live_session_count'] = 1
+        else:
+            binary['active_session'] = None
+            binary['live_session_count'] = 0
+        return binary
+
     def _create_session_snapshot(self, binary: dict[str, Any], source_path: Path) -> Path:
         snapshots_dir = self.store.db_path.parent / 'session_snapshots' / binary['binary_id']
         snapshots_dir.mkdir(parents=True, exist_ok=True)
@@ -1943,12 +2123,13 @@ class HeadlessWebBackend:
         self._reconcile_session_rows()
         projects = self.store.list_projects()
         for project in projects:
-            project['binaries'] = self.store.list_binaries(project['project_id'])
+            project['binaries'] = [
+                self._enrich_binary_record(binary)
+                for binary in self.store.list_binaries(project['project_id'])
+            ]
             live_count = 0
             for binary in project['binaries']:
-                live = self._find_live_session_for_open_path(self._resolve_open_path(binary))
-                binary['live_session_count'] = 1 if live else 0
-                if live:
+                if binary.get('active_session'):
                     live_count += 1
             project['live_session_count'] = live_count
         return {'projects': projects}
@@ -2067,6 +2248,18 @@ class HeadlessWebBackend:
             if source_open_path.suffix.lower() in {'.i64', '.idb'}:
                 self.store.update_binary_idb_path(binary_id, source_open_path)
             session_row = self._session_row_for_live_runtime(binary_id, existing_live)
+            metadata = dict(session_row.get('metadata') or {})
+            reuse_count = int(metadata.get('reuse_count') or 0) + 1
+            self.store.update_session_metadata(
+                existing_live['session_id'],
+                {
+                    'reuse_count': reuse_count,
+                    'last_reused_at': datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            session_row = self._enrich_session_record(
+                self.store.get_session(existing_live['session_id']) or session_row
+            )
             result = {'session': session_row, 'live': existing_live, 'reused': True}
             self._record_operation(
                 'open_session',
@@ -2115,6 +2308,7 @@ class HeadlessWebBackend:
                 'open_path': str(actual_open_path),
                 'source_open_path': str(source_open_path),
                 'snapshot_of': snapshot_of,
+                'reuse_count': 0,
             },
         )
         if source_open_path.suffix.lower() in {'.i64', '.idb'}:
@@ -2123,7 +2317,7 @@ class HeadlessWebBackend:
             guessed_idb_path = self.store._guess_idb_path(Path(binary['binary_path']))
             if guessed_idb_path is not None:
                 self.store.update_binary_idb_path(binary_id, guessed_idb_path)
-        result = {'session': self.store.get_session(session['session_id']), 'live': session}
+        result = {'session': self._enrich_session_record(self.store.get_session(session['session_id']) or {}), 'live': session}
         self._record_operation(
             'open_session',
             payload={
@@ -2164,7 +2358,48 @@ class HeadlessWebBackend:
         items = self.store.list_sessions(include_closed=False)
         for item in items:
             item['live'] = live_map.get(item['runtime_session_id'])
+            self._enrich_session_record(item)
         return {'sessions': items}
+
+    def list_snapshots(self, binary_id: str) -> dict[str, Any]:
+        binary = self._require_binary(binary_id)
+        return {
+            'binary_id': binary_id,
+            'binary': self._enrich_binary_record(binary),
+            'snapshots': self._list_snapshot_records(binary_id),
+        }
+
+    def delete_snapshot(self, binary_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        snapshot_path = payload.get('path')
+        if not snapshot_path:
+            raise ValueError('path is required')
+        root = self._snapshot_root_for_binary(binary_id).resolve()
+        candidate = Path(snapshot_path).expanduser().resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError('snapshot path is outside snapshot root') from exc
+        if not candidate.exists():
+            raise FileNotFoundError(candidate)
+        live = self._find_live_session_for_open_path(candidate)
+        if live is not None:
+            raise RuntimeError(f'snapshot is currently in use by session {live["session_id"]}')
+        deleted_paths: list[str] = []
+        for sibling in candidate.parent.glob(f'{candidate.stem}.*'):
+            if sibling.is_file():
+                sibling.unlink()
+                deleted_paths.append(str(sibling.resolve()))
+        result = {'ok': True, 'deleted': str(candidate), 'deleted_paths': deleted_paths}
+        binary = self._require_binary(binary_id)
+        self._record_operation(
+            'delete_snapshot',
+            payload=payload,
+            result=result,
+            project_id=binary['project_id'],
+            binary_id=binary_id,
+            target=str(candidate),
+        )
+        return result
 
     def session_tool(self, runtime_session_id: str, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         result = self.sessions.call_tool(tool_name, arguments, session_id=runtime_session_id)
@@ -2809,6 +3044,10 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
+            if path.startswith('/api/binaries/') and path.endswith('/snapshots'):
+                binary_id = path.split('/')[3]
+                self._json(200, self.backend.list_snapshots(binary_id))
+                return
             if path.startswith('/api/sessions/') and path.endswith('/lookup'):
                 session_id = path.split('/')[3]
                 self._json(200, self.backend.lookup(session_id, query.get('query', [''])[0]))
@@ -2927,6 +3166,20 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
             logger.exception('POST %s failed', path)
             self._json(500, {'error': str(exc)})
 
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        try:
+            payload = self._read_json()
+            if path.startswith('/api/binaries/') and path.endswith('/snapshots'):
+                binary_id = path.split('/')[3]
+                self._json(200, self.backend.delete_snapshot(binary_id, payload))
+                return
+            self._json(404, {'error': f'unknown route: {path}'})
+        except Exception as exc:
+            logger.exception('DELETE %s failed', path)
+            self._json(500, {'error': str(exc)})
+
     def log_message(self, format: str, *args: Any) -> None:
         logger.info('%s - %s', self.address_string(), format % args)
 
@@ -2942,6 +3195,7 @@ def main() -> None:
     parser.add_argument('--open-session', action='store_true', help='Open a live session for startup artifacts')
     parser.add_argument('--refresh-on-start', action='store_true', help='Refresh indexes for startup artifacts after opening sessions')
     parser.add_argument('--unsafe', action='store_true')
+    parser.add_argument('--allow-user-plugins', action='store_true', help='Allow loading user plugins from ~/.idapro in spawned headless workers')
     parser.add_argument('--verbose', '-v', action='store_true')
     args = parser.parse_args()
 
@@ -2961,6 +3215,7 @@ def main() -> None:
         verbose=args.verbose,
         notifier=notifier,
         notify_api_url=notify_api_url,
+        disable_user_plugins=not args.allow_user_plugins,
     )
     atexit.register(backend.shutdown)
 

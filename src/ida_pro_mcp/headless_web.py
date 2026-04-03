@@ -936,9 +936,14 @@ function renderIndexBadges() {
   container.innerHTML = badges.map(([label, value]) => `<span class='badge ${value ? 'success' : ''}'>${label}: ${escapeHtml(value ? new Date(value).toLocaleTimeString() : '—')}</span>`).join('');
 }
 
+function selectedContext() {
+  return state.selectedItem?.context || {};
+}
+
 function renderInspector() {
   const binary = selectedBinary();
   const item = state.selectedItem;
+  const ctx = selectedContext();
   const rows = [
     ['Kind', item?.kind || '—'],
     ['Name', item?.name || '—'],
@@ -947,11 +952,37 @@ function renderInspector() {
     ['Session', state.selectedSessionId || '—'],
     ['Live event', state.lastLiveEvent ? `${state.lastLiveEvent.operation_type || state.lastLiveEvent.event} @ ${state.lastLiveEvent.target || '—'}` : '—'],
   ];
+  if (item?.kind === 'function' || ctx.kind === 'function') {
+    rows.push(
+      ['Prototype', ctx.prototype || '—'],
+      ['Size', ctx.function?.size || item?.raw?.size || '—'],
+      ['Callers', String((ctx.callers || []).length || 0)],
+      ['Callees', String((ctx.callees || []).length || 0)],
+      ['Strings', String((ctx.strings || []).length || 0)],
+      ['Comments', String(ctx.comment_count || 0)],
+    );
+  } else if (item?.kind === 'string' || ctx.kind === 'string') {
+    rows.push(
+      ['Length', String((ctx.value || item?.raw?.string || '').length || 0)],
+      ['Ref funcs', String(ctx.ref_function_count || 0)],
+      ['Incoming refs', String((ctx.incoming_refs || []).length || 0)],
+      ['Outgoing refs', String((ctx.outgoing_refs || []).length || 0)],
+    );
+  } else if (item?.kind === 'struct') {
+    rows.push(
+      ['Size', item?.raw?.size || '—'],
+      ['Members', item?.raw?.members || item?.raw?.cardinality || '—'],
+    );
+  }
   document.getElementById('inspectorSummary').innerHTML = rows.map(([label, value]) => `
     <div class='label'>${escapeHtml(label)}</div>
     <div class='value mono'>${escapeHtml(value)}</div>
   `).join('');
   document.getElementById('renameInput').value = item?.name && !String(item.name).startsWith('0x') ? item.name : '';
+}
+
+function renderDetails(value) {
+  document.getElementById('detailsOutput').textContent = prettyJson(value);
 }
 
 function renderResourceButtons() {
@@ -1272,6 +1303,20 @@ function findFirstAddress(value) {
   return null;
 }
 
+function extractFunctionEntry(value) {
+  const current = unwrapResult(value);
+  if (Array.isArray(current)) {
+    for (const item of current) {
+      if (item && typeof item === 'object' && item.fn) return item.fn;
+    }
+    return null;
+  }
+  if (current && typeof current === 'object' && current.fn) {
+    return current.fn;
+  }
+  return null;
+}
+
 async function refreshResourcePane() {
   if (!state.selectedBinaryId) {
     document.getElementById('resourceList').innerHTML = `<div class='empty'>Select a binary to browse cached analysis.</div>`;
@@ -1336,10 +1381,10 @@ async function selectFunction(item) {
   };
   document.getElementById('gotoInput').value = item.addr || item.name || '';
   renderInspector();
-  document.getElementById('detailsOutput').textContent = prettyJson(item);
+  renderDetails(item);
   await refreshResourcePane();
   setTab('decompile');
-  await loadLookupDetails(item.addr || item.name || '');
+  await loadSelectionContext();
   await Promise.all([loadDecompiler(item.addr), loadDisasm(item.addr), loadXrefs(item.addr)]);
 }
 
@@ -1352,9 +1397,10 @@ async function selectString(item) {
   };
   document.getElementById('gotoInput').value = item.addr || '';
   renderInspector();
-  document.getElementById('detailsOutput').textContent = prettyJson(item);
+  renderDetails(item);
   await refreshResourcePane();
   setTab('strings');
+  await loadSelectionContext();
   await loadXrefs(item.addr);
 }
 
@@ -1366,7 +1412,7 @@ async function selectStruct(item) {
     raw: item,
   };
   renderInspector();
-  document.getElementById('detailsOutput').textContent = prettyJson(item);
+  renderDetails(item);
   await refreshResourcePane();
   setTab('structs');
   document.getElementById('xrefsList').innerHTML = `<div class='empty'>Cross references are address-based; select a function or string to inspect xrefs.</div>`;
@@ -1380,7 +1426,7 @@ function selectHistoryEntry(item) {
     raw: item,
   };
   renderInspector();
-  document.getElementById('detailsOutput').textContent = prettyJson(item);
+  renderDetails(item);
   refreshResourcePane();
   setTab('history');
 }
@@ -1391,19 +1437,52 @@ async function lookupAndOpen() {
   if (!state.selectedSessionId) return setStatus('Start a session first.', '', true);
   const payload = await api(`/api/sessions/${state.selectedSessionId}/lookup?query=${encodeURIComponent(query)}`);
   const normalized = unwrapResult(payload.result ?? payload);
+  const fn = extractFunctionEntry(normalized);
   const addr = findFirstAddress(normalized) || query;
   state.selectedItem = {
-    kind: 'lookup',
-    name: query,
+    kind: fn ? 'function' : 'lookup',
+    name: fn?.name || query,
     addr,
-    raw: normalized,
+    raw: fn || normalized,
   };
   renderInspector();
-  document.getElementById('detailsOutput').textContent = prettyJson(normalized);
+  renderDetails(normalized);
   setStatus('Resolved symbol/address.', addr);
   if (/^0x[0-9a-f]+$/i.test(addr)) {
+    await loadSelectionContext();
     await Promise.all([loadDecompiler(addr), loadDisasm(addr), loadXrefs(addr)]);
     setTab('decompile');
+  }
+}
+
+async function loadContext(kind, query) {
+  if (!state.selectedSessionId || !query) return null;
+  const payload = await api(`/api/sessions/${state.selectedSessionId}/context?kind=${encodeURIComponent(kind)}&query=${encodeURIComponent(query)}`);
+  return unwrapResult(payload.result ?? payload);
+}
+
+async function loadSelectionContext() {
+  if (!state.selectedItem) return;
+  try {
+    let context = null;
+    if (state.selectedItem.kind === 'function') {
+      context = await loadContext('function', state.selectedItem.addr || state.selectedItem.name || '');
+    } else if (state.selectedItem.kind === 'string') {
+      context = await loadContext('string', state.selectedItem.addr || '');
+    } else if (state.selectedItem.kind === 'lookup' && state.selectedItem.addr) {
+      context = await loadContext('function', state.selectedItem.addr);
+    } else {
+      return await loadLookupDetails(state.selectedItem.addr || state.selectedItem.name || '');
+    }
+    if (context) {
+      state.selectedItem.context = context;
+      if (context.function?.name) state.selectedItem.name = context.function.name;
+      if (context.resolved_addr) state.selectedItem.addr = context.resolved_addr;
+      renderDetails(context);
+      renderInspector();
+    }
+  } catch (err) {
+    renderDetails({error: err.message});
   }
 }
 
@@ -1413,10 +1492,10 @@ async function loadLookupDetails(query) {
     const payload = await api(`/api/sessions/${state.selectedSessionId}/lookup?query=${encodeURIComponent(query)}`);
     const normalized = unwrapResult(payload.result ?? payload);
     if (state.selectedItem) state.selectedItem.raw = normalized;
-    document.getElementById('detailsOutput').textContent = prettyJson(normalized);
+    renderDetails(normalized);
     renderInspector();
   } catch (err) {
-    document.getElementById('detailsOutput').textContent = `Lookup failed: ${err.message}`;
+    renderDetails({error: `Lookup failed: ${err.message}`});
   }
 }
 
@@ -1463,6 +1542,7 @@ function normalizeXrefBuckets(value) {
       return {
         to: current.incoming || [],
         from: current.outgoing || [],
+        refFunctions: current.ref_functions || [],
         callers: current.callers || [],
         callees: current.callees || [],
         total: current.total || 0,
@@ -1473,6 +1553,7 @@ function normalizeXrefBuckets(value) {
       return {
         to: current.data.filter((item) => item.direction === 'to'),
         from: current.data.filter((item) => item.direction === 'from'),
+        refFunctions: [],
         callers: [],
         callees: [],
         total: current.total,
@@ -1480,11 +1561,11 @@ function normalizeXrefBuckets(value) {
       };
     }
     if (Array.isArray(current.xrefs)) {
-      return {to: current.xrefs || [], from: [], callers: [], callees: []};
+      return {to: current.xrefs || [], from: [], refFunctions: [], callers: [], callees: []};
     }
   }
 
-  return {to: [], from: [], callers: [], callees: [], total: 0, resolvedAddr: null};
+  return {to: [], from: [], refFunctions: [], callers: [], callees: [], total: 0, resolvedAddr: null};
 }
 
 function xrefRowAddress(item, direction) {
@@ -1496,10 +1577,11 @@ function xrefRowSummary(item, direction) {
   const fn = item.fn;
   const fnName = typeof fn === 'string' ? fn : (fn?.name || fn?.addr || '');
   const type = item.type || item.kind || 'xref';
+  const site = direction === 'to' ? (item.from || item.addr || '') : (item.to || item.addr || '');
   if (direction === 'to') {
-    return [fnName, type, 'incoming'].filter(Boolean).join(' · ');
+    return [fnName, type, 'incoming', site ? `site ${site}` : ''].filter(Boolean).join(' · ');
   }
-  return [fnName, type, 'outgoing'].filter(Boolean).join(' · ');
+  return [fnName, type, 'outgoing', site ? `target ${site}` : ''].filter(Boolean).join(' · ');
 }
 
 function renderXrefGroup(title, direction, items, emptyText) {
@@ -1569,7 +1651,7 @@ function renderCallGroup(title, items, emptyText) {
         ${items.map((item) => {
           const encodedAddr = encodeURIComponent(item.addr || '');
           const sites = Array.isArray(item.sites) && item.sites.length ? item.sites.slice(0, 3).join(', ') : '';
-          const details = sites ? `sites: ${sites}` : `${item.count || 1} edge(s)`;
+          const details = sites ? `callsites: ${sites}` : `${item.count || 1} edge(s)`;
           return `
             <div class='xref-item' data-jump-addr='${encodedAddr}'>
               <div class='row' style='justify-content:space-between;'>
@@ -1596,15 +1678,17 @@ async function loadXrefs(addr) {
     const grouped = normalizeXrefBuckets(payload.result ?? payload);
     const incoming = grouped.to || [];
     const outgoing = grouped.from || [];
+    const refFunctions = grouped.refFunctions || [];
     const callers = grouped.callers || [];
     const callees = grouped.callees || [];
-    if (!incoming.length && !outgoing.length && !callers.length && !callees.length) {
+    if (!incoming.length && !outgoing.length && !refFunctions.length && !callers.length && !callees.length) {
       container.innerHTML = `<div class='empty'>No xrefs for ${escapeHtml(addr)}.</div>`;
       return;
     }
     container.innerHTML = `
       ${state.selectedItem?.kind === 'function' ? renderCallGroup('Callers', callers, 'No caller functions found.') : ''}
       ${state.selectedItem?.kind === 'function' ? renderCallGroup('Callees', callees, 'No callee functions found.') : ''}
+      ${state.selectedItem?.kind === 'string' ? renderCallGroup('Referencing functions', refFunctions, 'No referencing functions found.') : ''}
       ${renderXrefGroup('Incoming refs (to current)', 'to', incoming, 'No incoming references.')}
       ${renderXrefGroup('Outgoing refs (from current)', 'from', outgoing, 'No outgoing references.')}
     `;
@@ -1634,6 +1718,7 @@ async function renameSelected() {
   setStatus('Rename applied.', `${addr} → ${newName}`);
   if (state.selectedItem) state.selectedItem.name = newName;
   await refreshIndexes(true);
+  await loadSelectionContext();
   renderInspector();
 }
 
@@ -1644,6 +1729,7 @@ async function commentSelected() {
   if (!comment) return setStatus('Comment text is required.', '', true);
   await api(`/api/sessions/${state.selectedSessionId}/comment`, {method: 'POST', body: JSON.stringify({addr, comment})});
   setStatus('Comment saved.', addr);
+  await loadSelectionContext();
   await refreshResourcePane();
 }
 
@@ -1686,7 +1772,7 @@ function scheduleWorkspaceLiveRefresh(payload) {
 
     if (state.selectedItem?.addr && isCodeViewOperation(op)) {
       await Promise.allSettled([
-        loadLookupDetails(state.selectedItem.addr),
+        loadSelectionContext(),
         loadDecompiler(state.selectedItem.addr),
         loadDisasm(state.selectedItem.addr),
         loadXrefs(state.selectedItem.addr),
@@ -1973,6 +2059,126 @@ class HeadlessWebBackend:
             raise ValueError('query is required')
         return self.session_tool(runtime_session_id, 'lookup_funcs', {'queries': query})
 
+    def _resolve_function_for_addr(self, runtime_session_id: str, addr: str) -> dict[str, Any] | None:
+        if not addr:
+            return None
+        try:
+            lookup_result = self._unwrap_tool_result(
+                self.sessions.call_tool('lookup_funcs', {'queries': addr}, session_id=runtime_session_id)
+            )
+            entry = (lookup_result or [{}])[0] if isinstance(lookup_result, list) else (lookup_result or {})
+            fn = entry.get('fn') if isinstance(entry, dict) else None
+            return fn if isinstance(fn, dict) and fn.get('addr') else None
+        except Exception:
+            return None
+
+    def _group_rows_by_function(
+        self,
+        runtime_session_id: str,
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            fn = row.get('fn') or {}
+            if not fn:
+                fn = self._resolve_function_for_addr(
+                    runtime_session_id,
+                    str(row.get('from') or row.get('addr') or ''),
+                ) or {}
+            fn_addr = str(fn.get('addr') or '')
+            fn_name = str(fn.get('name') or '')
+            site = str(row.get('from') or row.get('addr') or '')
+            key = fn_addr or fn_name
+            if not key:
+                continue
+            item = grouped.setdefault(
+                key,
+                {
+                    'addr': fn_addr or site or key,
+                    'name': fn_name or fn_addr or key,
+                    'sites': [],
+                    'types': [],
+                    'count': 0,
+                },
+            )
+            if site and site not in item['sites']:
+                item['sites'].append(site)
+            row_type = str(row.get('type') or '')
+            if row_type and row_type not in item['types']:
+                item['types'].append(row_type)
+            item['count'] = len(item['sites']) or max(item['count'], 1)
+        return sorted(
+            grouped.values(),
+            key=lambda item: (-int(item.get('count') or 0), str(item.get('name') or item.get('addr') or '')),
+        )
+
+    def context(self, runtime_session_id: str, kind: str, query: str) -> dict[str, Any]:
+        if not query:
+            raise ValueError('query is required')
+        kind = (kind or 'lookup').strip().lower()
+
+        if kind in {'function', 'lookup'}:
+            lookup_result = self._unwrap_tool_result(
+                self.sessions.call_tool('lookup_funcs', {'queries': query}, session_id=runtime_session_id)
+            )
+            lookup_entry = (lookup_result or [{}])[0] if isinstance(lookup_result, list) else (lookup_result or {})
+            fn = lookup_entry.get('fn') or {}
+            resolved_addr = str(fn.get('addr') or query)
+            analysis = self._unwrap_tool_result(
+                self.sessions.call_tool(
+                    'analyze_function',
+                    {'addr': resolved_addr, 'include_asm': False},
+                    session_id=runtime_session_id,
+                )
+            )
+            xrefs = self.xrefs(runtime_session_id, resolved_addr, limit=50).get('result', {})
+            comments = analysis.get('comments') if isinstance(analysis, dict) else {}
+            result = {
+                'kind': 'function',
+                'query': query,
+                'resolved_addr': resolved_addr,
+                'function': {
+                    'addr': resolved_addr,
+                    'name': fn.get('name') or analysis.get('name') or query,
+                    'size': fn.get('size') or analysis.get('size'),
+                },
+                'prototype': analysis.get('prototype') if isinstance(analysis, dict) else None,
+                'strings': analysis.get('strings') if isinstance(analysis, dict) else [],
+                'constants': analysis.get('constants') if isinstance(analysis, dict) else [],
+                'comments': comments or {},
+                'comment_count': len(comments or {}),
+                'callers': xrefs.get('callers') or [],
+                'callees': xrefs.get('callees') or [],
+                'incoming_refs': xrefs.get('incoming') or [],
+                'outgoing_refs': xrefs.get('outgoing') or [],
+                'analysis': analysis,
+            }
+            return {'session_id': runtime_session_id, 'kind': 'function', 'result': result}
+
+        if kind == 'string':
+            string_result = self._unwrap_tool_result(
+                self.sessions.call_tool('get_string', {'addrs': query}, session_id=runtime_session_id)
+            )
+            string_entry = (string_result or [{}])[0] if isinstance(string_result, list) else (string_result or {})
+            xrefs = self.xrefs(runtime_session_id, query, limit=100).get('result', {})
+            incoming = list(xrefs.get('incoming') or [])
+            outgoing = list(xrefs.get('outgoing') or [])
+            ref_functions = self._group_rows_by_function(runtime_session_id, incoming)
+            result = {
+                'kind': 'string',
+                'query': query,
+                'resolved_addr': str(string_entry.get('addr') or query),
+                'value': string_entry.get('value'),
+                'error': string_entry.get('error'),
+                'ref_functions': ref_functions,
+                'incoming_refs': incoming,
+                'outgoing_refs': outgoing,
+                'ref_function_count': len(ref_functions),
+            }
+            return {'session_id': runtime_session_id, 'kind': 'string', 'result': result}
+
+        raise ValueError(f'unsupported context kind: {kind}')
+
     def xrefs(self, runtime_session_id: str, addr: str, limit: int = 50) -> dict[str, Any]:
         if not addr:
             raise ValueError('addr is required')
@@ -1998,6 +2204,7 @@ class HeadlessWebBackend:
         incoming = [row for row in xref_rows if row.get('direction') == 'to']
         outgoing = [row for row in xref_rows if row.get('direction') == 'from']
 
+        ref_functions = self._group_rows_by_function(runtime_session_id, incoming)
         callers_map: dict[str, dict[str, Any]] = {}
         for row in incoming:
             if row.get('type') != 'code':
@@ -2065,6 +2272,7 @@ class HeadlessWebBackend:
                 'resolved_addr': resolved_addr,
                 'incoming': incoming,
                 'outgoing': outgoing,
+                'ref_functions': ref_functions,
                 'callers': list(callers_map.values()),
                 'callees': list(callees_map.values()),
                 'total': len(xref_rows),
@@ -2477,6 +2685,17 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
             if path.startswith('/api/sessions/') and path.endswith('/lookup'):
                 session_id = path.split('/')[3]
                 self._json(200, self.backend.lookup(session_id, query.get('query', [''])[0]))
+                return
+            if path.startswith('/api/sessions/') and path.endswith('/context'):
+                session_id = path.split('/')[3]
+                self._json(
+                    200,
+                    self.backend.context(
+                        session_id,
+                        query.get('kind', ['lookup'])[0],
+                        query.get('query', [''])[0],
+                    ),
+                )
                 return
             if path.startswith('/api/sessions/') and path.endswith('/xrefs'):
                 session_id = path.split('/')[3]

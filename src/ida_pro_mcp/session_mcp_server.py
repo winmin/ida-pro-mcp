@@ -10,7 +10,7 @@ Usage:
     # Start the session-aware MCP server
     uv run idalib-session-mcp
 
-    # With SSE transport
+    # With HTTP transport (/mcp recommended; /sse also supported)
     uv run idalib-session-mcp --transport http://127.0.0.1:8744/sse
 
     # Generate tools cache (run once to enable all tools on startup)
@@ -22,6 +22,7 @@ import sys
 import ast
 import atexit
 import json
+import shutil
 import time
 import uuid
 import signal
@@ -278,6 +279,7 @@ class SessionMcpServer:
         self.verbose = verbose
         self._lock = threading.Lock()
         self._port_counter = SESSION_PORT_START
+        self._snapshot_root = (Path.cwd() / '.ida-session-snapshots').resolve()
 
         # Load IDA tools: try cache first, fall back to AST extraction from source
         self._cached_ida_tools: Optional[list[dict]] = load_cached_tools()
@@ -626,6 +628,31 @@ class SessionMcpServer:
             "id": id,
         }
 
+    @staticmethod
+    def _normalize_path(path: str | Path) -> str:
+        return str(Path(path).expanduser().resolve())
+
+    def _find_existing_session_for_path(self, binary_path: str | Path) -> Optional[Session]:
+        normalized = self._normalize_path(binary_path)
+        with self._lock:
+            for session in self.sessions.values():
+                if self._normalize_path(session.binary_path) == normalized:
+                    return session
+        return None
+
+    def _create_snapshot_copy(self, binary_path: str | Path) -> str:
+        source = Path(binary_path).expanduser().resolve()
+        session_dir = self._snapshot_root / source.stem
+        session_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+        destination = session_dir / f'{source.stem}-{timestamp}{source.suffix}'
+        suffix_index = 1
+        while destination.exists():
+            destination = session_dir / f'{source.stem}-{timestamp}-{suffix_index}{source.suffix}'
+            suffix_index += 1
+        shutil.copy2(source, destination)
+        return str(destination)
+
     def _find_available_port(self) -> int:
         """Find an available port for a new session"""
         for port in range(self._port_counter, SESSION_PORT_END):
@@ -654,6 +681,26 @@ class SessionMcpServer:
 
         if not os.path.exists(binary_path):
             raise FileNotFoundError(f"Binary not found: {binary_path}")
+
+        existing = self._find_existing_session_for_path(binary_path)
+        if existing is not None:
+            return existing
+
+        return self._spawn_session(
+            binary_path,
+            live_notify_url=live_notify_url,
+            notify_project_id=notify_project_id,
+            notify_binary_id=notify_binary_id,
+        )
+
+    def _spawn_session(
+        self,
+        binary_path: str,
+        live_notify_url: str | None = None,
+        notify_project_id: str | None = None,
+        notify_binary_id: str | None = None,
+    ) -> Session:
+        binary_path = os.path.abspath(binary_path)
 
         session_id = str(uuid.uuid4())[:8]
         port = self._find_available_port()
@@ -715,10 +762,34 @@ class SessionMcpServer:
         )
         thread.start()
 
-        # Wait for ready
-        self._wait_for_session_ready(session_id, timeout=120)
-
-        return self.sessions[session_id]
+        try:
+            self._wait_for_session_ready(session_id, timeout=120)
+            return self.sessions[session_id]
+        except Exception as first_error:
+            self._destroy_session(session_id)
+            suffix = Path(binary_path).suffix.lower()
+            if suffix not in {'.i64', '.idb'}:
+                raise
+            try:
+                Path(binary_path).resolve().relative_to(self._snapshot_root)
+                is_snapshot = True
+            except ValueError:
+                is_snapshot = False
+            if is_snapshot:
+                raise
+            snapshot_path = self._create_snapshot_copy(binary_path)
+            logger.warning(
+                "Falling back to snapshot copy for %s due to open failure: %s -> %s",
+                binary_path,
+                first_error,
+                snapshot_path,
+            )
+            return self._spawn_session(
+                snapshot_path,
+                live_notify_url=live_notify_url,
+                notify_project_id=notify_project_id,
+                notify_binary_id=notify_binary_id,
+            )
 
     def _wait_for_session_ready(self, session_id: str, timeout: float = 120):
         """Wait for session to become ready"""
@@ -964,7 +1035,7 @@ def main():
         "--transport",
         type=str,
         default="stdio",
-        help="MCP transport: stdio (default) or http://host:port/sse",
+        help="MCP transport: stdio (default) or http://host:port/(mcp|sse); /mcp is recommended",
     )
     parser.add_argument(
         "--unsafe", action="store_true", help="Enable unsafe functions (DANGEROUS)"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import shutil
 import json
 import logging
 import threading
@@ -1828,6 +1829,7 @@ class HeadlessWebBackend:
         self.sessions = SessionMcpServer(unsafe=unsafe, verbose=verbose)
         self.notifier = notifier
         self.notify_api_url = notify_api_url
+        self._reconcile_session_rows()
 
     def shutdown(self) -> None:
         self.sessions.cleanup()
@@ -1847,6 +1849,72 @@ class HeadlessWebBackend:
             if project['name'] == normalized:
                 return self.store.get_project(project['project_id']) or project
         return self.store.create_project(normalized, root_dir or str(Path.cwd()))
+
+    def _live_runtime_map(self) -> dict[str, dict[str, Any]]:
+        return {record['session_id']: record for record in self.sessions.list_session_records()}
+
+    @staticmethod
+    def _normalized_path(value: str | Path | None) -> str | None:
+        if value is None:
+            return None
+        return str(Path(value).expanduser().resolve())
+
+    def _resolve_open_path(self, binary: dict[str, Any]) -> Path:
+        explicit_idb = binary.get('idb_path')
+        if explicit_idb:
+            explicit_path = Path(str(explicit_idb)).expanduser().resolve()
+            if explicit_path.exists():
+                return explicit_path
+        binary_path = Path(str(binary['binary_path'])).expanduser().resolve()
+        guessed = self.store._guess_idb_path(binary_path)
+        return guessed or binary_path
+
+    def _find_live_session_for_open_path(self, open_path: str | Path) -> dict[str, Any] | None:
+        normalized_open_path = self._normalized_path(open_path)
+        if normalized_open_path is None:
+            return None
+        for record in self._live_runtime_map().values():
+            if self._normalized_path(record.get('binary_path')) == normalized_open_path:
+                return record
+        return None
+
+    def _reconcile_session_rows(self) -> None:
+        live_ids = set(self._live_runtime_map())
+        for session in self.store.list_sessions(include_closed=False):
+            if session['runtime_session_id'] not in live_ids:
+                self.store.record_session_close(session['runtime_session_id'], status='stale')
+
+    def _session_row_for_live_runtime(self, binary_id: str, live_record: dict[str, Any]) -> dict[str, Any]:
+        session = self.store.get_session(live_record['session_id'])
+        if session is not None:
+            return session
+        binary = self._require_binary(binary_id)
+        self.store.record_session_open(
+            project_id=binary['project_id'],
+            binary_id=binary_id,
+            runtime_session_id=live_record['session_id'],
+            worker_port=live_record.get('port'),
+            worker_pid=live_record.get('pid'),
+            status=live_record.get('status', 'ready'),
+            metadata={'binary_path': binary['binary_path'], 'open_path': live_record.get('binary_path')},
+        )
+        return self.store.get_session(live_record['session_id']) or {
+            'runtime_session_id': live_record['session_id'],
+            'project_id': binary['project_id'],
+            'binary_id': binary_id,
+        }
+
+    def _create_session_snapshot(self, binary: dict[str, Any], source_path: Path) -> Path:
+        snapshots_dir = self.store.db_path.parent / 'session_snapshots' / binary['binary_id']
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+        destination = snapshots_dir / f'{source_path.stem}-{timestamp}{source_path.suffix}'
+        suffix_index = 1
+        while destination.exists():
+            destination = snapshots_dir / f'{source_path.stem}-{timestamp}-{suffix_index}{source_path.suffix}'
+            suffix_index += 1
+        shutil.copy2(source_path, destination)
+        return destination
 
     def bootstrap_artifacts(
         self,
@@ -1872,9 +1940,17 @@ class HeadlessWebBackend:
         return {'project': project, 'items': bootstrapped}
 
     def list_projects(self) -> dict[str, Any]:
+        self._reconcile_session_rows()
         projects = self.store.list_projects()
         for project in projects:
             project['binaries'] = self.store.list_binaries(project['project_id'])
+            live_count = 0
+            for binary in project['binaries']:
+                live = self._find_live_session_for_open_path(self._resolve_open_path(binary))
+                binary['live_session_count'] = 1 if live else 0
+                if live:
+                    live_count += 1
+            project['live_session_count'] = live_count
         return {'projects': projects}
 
     def _require_binary(self, binary_id: str) -> dict[str, Any]:
@@ -1884,7 +1960,10 @@ class HeadlessWebBackend:
         return binary
 
     def _require_live_session_for_binary(self, binary_id: str) -> dict[str, Any]:
-        session = self.store.get_live_session_for_binary(binary_id)
+        self._reconcile_session_rows()
+        binary = self._require_binary(binary_id)
+        live = self._find_live_session_for_open_path(self._resolve_open_path(binary))
+        session = self._session_row_for_live_runtime(binary_id, live) if live else None
         if session is None:
             raise RuntimeError(
                 f'no live session for binary {binary_id}; start a session first'
@@ -1980,15 +2059,50 @@ class HeadlessWebBackend:
 
     def open_session(self, binary_id: str) -> dict[str, Any]:
         binary = self._require_binary(binary_id)
-        open_path = binary.get('idb_path') or binary['binary_path']
-        if binary.get('idb_path') and not Path(str(binary['idb_path'])).exists():
-            open_path = binary['binary_path']
-        session = self.sessions.create_session(
-            str(open_path),
-            live_notify_url=self.notify_api_url,
-            notify_project_id=binary['project_id'],
-            notify_binary_id=binary_id,
-        )
+        self._reconcile_session_rows()
+        source_open_path = self._resolve_open_path(binary)
+        actual_open_path = source_open_path
+        existing_live = self._find_live_session_for_open_path(source_open_path)
+        if existing_live is not None:
+            if source_open_path.suffix.lower() in {'.i64', '.idb'}:
+                self.store.update_binary_idb_path(binary_id, source_open_path)
+            session_row = self._session_row_for_live_runtime(binary_id, existing_live)
+            result = {'session': session_row, 'live': existing_live, 'reused': True}
+            self._record_operation(
+                'open_session',
+                payload={'binary_id': binary_id, 'open_path': str(source_open_path), 'reused': True},
+                result=result,
+                project_id=binary['project_id'],
+                binary_id=binary_id,
+                runtime_session_id=existing_live['session_id'],
+                target=str(source_open_path),
+            )
+            return result
+        snapshot_of: str | None = None
+        try:
+            session = self.sessions.create_session(
+                str(actual_open_path),
+                live_notify_url=self.notify_api_url,
+                notify_project_id=binary['project_id'],
+                notify_binary_id=binary_id,
+            )
+        except RuntimeError as exc:
+            if source_open_path.suffix.lower() not in {'.i64', '.idb'}:
+                raise
+            actual_open_path = self._create_session_snapshot(binary, source_open_path)
+            snapshot_of = str(source_open_path)
+            logger.warning(
+                'Falling back to snapshot copy for %s due to open failure: %s -> %s',
+                source_open_path,
+                exc,
+                actual_open_path,
+            )
+            session = self.sessions.create_session(
+                str(actual_open_path),
+                live_notify_url=self.notify_api_url,
+                notify_project_id=binary['project_id'],
+                notify_binary_id=binary_id,
+            )
         self.store.record_session_open(
             project_id=binary['project_id'],
             binary_id=binary_id,
@@ -1996,21 +2110,33 @@ class HeadlessWebBackend:
             worker_port=session.get('port'),
             worker_pid=session.get('pid'),
             status=session.get('status', 'ready'),
-            metadata={'binary_path': binary['binary_path'], 'open_path': str(open_path)},
+            metadata={
+                'binary_path': binary['binary_path'],
+                'open_path': str(actual_open_path),
+                'source_open_path': str(source_open_path),
+                'snapshot_of': snapshot_of,
+            },
         )
-        idb_path = Path(binary['binary_path'])
-        if idb_path.suffix.lower() not in {'.i64', '.idb'}:
-            idb_path = idb_path.with_suffix('.i64')
-        self.store.update_binary_idb_path(binary_id, idb_path)
+        if source_open_path.suffix.lower() in {'.i64', '.idb'}:
+            self.store.update_binary_idb_path(binary_id, source_open_path)
+        else:
+            guessed_idb_path = self.store._guess_idb_path(Path(binary['binary_path']))
+            if guessed_idb_path is not None:
+                self.store.update_binary_idb_path(binary_id, guessed_idb_path)
         result = {'session': self.store.get_session(session['session_id']), 'live': session}
         self._record_operation(
             'open_session',
-            payload={'binary_id': binary_id, 'open_path': str(open_path)},
+            payload={
+                'binary_id': binary_id,
+                'open_path': str(actual_open_path),
+                'source_open_path': str(source_open_path),
+                'snapshot_of': snapshot_of,
+            },
             result=result,
             project_id=binary['project_id'],
             binary_id=binary_id,
             runtime_session_id=session['session_id'],
-            target=str(open_path),
+            target=str(actual_open_path),
         )
         return result
 
@@ -2033,6 +2159,7 @@ class HeadlessWebBackend:
         return result
 
     def list_sessions(self) -> dict[str, Any]:
+        self._reconcile_session_rows()
         live_map = {s['session_id']: s for s in self.sessions.list_session_records()}
         items = self.store.list_sessions(include_closed=False)
         for item in items:
@@ -2427,7 +2554,7 @@ class HeadlessWebBackend:
         session = (
             self.store.get_session(runtime_session_id)
             if runtime_session_id
-            else self.store.get_live_session_for_binary(binary_id)
+            else self._require_live_session_for_binary(binary_id)
         )
         if session is None:
             opened = self.open_session(binary_id)

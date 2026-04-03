@@ -702,10 +702,29 @@ class HeadlessProjectStore:
 
     @staticmethod
     def _guess_idb_path(binary_path: Path) -> Path | None:
-        if binary_path.suffix.lower() in {'.i64', '.idb'}:
-            return binary_path
-        for suffix in ('.i64', '.idb'):
-            candidate = binary_path.with_suffix(suffix)
+        for candidate in HeadlessProjectStore._candidate_idb_paths(binary_path):
             if candidate.exists():
                 return candidate
         return None
+
+    @staticmethod
+    def _candidate_idb_paths(binary_path: Path) -> list[Path]:
+        binary_path = binary_path.expanduser().resolve()
+        if binary_path.suffix.lower() in {'.i64', '.idb'}:
+            return [binary_path]
+
+        candidates: list[Path] = [
+            Path(f'{binary_path}.i64'),
+            Path(f'{binary_path}.idb'),
+            binary_path.with_suffix('.i64'),
+            binary_path.with_suffix('.idb'),
+        ]
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+        return unique

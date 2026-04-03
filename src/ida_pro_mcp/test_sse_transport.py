@@ -441,18 +441,19 @@ def test_session_with_binary(host: str, port: int, binary_path: str) -> bool:
             return False
         print(f"PASSED: Session status is ready")
 
-        # Test 4: Call an IDA tool (idb_meta)
-        print("\n[Test 4] Calling IDA tool (idb_meta)...")
+        # Test 4: Call an IDA tool (list_funcs)
+        print("\n[Test 4] Calling IDA tool (list_funcs)...")
         response = client.send_request("tools/call", {
-            "name": "idb_meta",
-            "arguments": {},
+            "name": "list_funcs",
+            "arguments": {"queries": {"filter": "*", "offset": 0, "count": 5}},
         }, timeout=120)  # IDA tools may take longer
         if response["result"].get("isError"):
             print(f"FAILED: {response['result']['content'][0]['text']}")
             return False
         content = response["result"]["content"][0]["text"]
         result = json.loads(content)
-        print(f"PASSED: Got IDB metadata: {result.get('input_file', 'unknown')}")
+        functions = result if isinstance(result, list) else result.get("items", [])
+        print(f"PASSED: Got {len(functions)} function(s)")
 
         # Test 5: Close session
         print("\n[Test 5] Closing session...")

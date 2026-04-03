@@ -34,8 +34,8 @@ import subprocess
 import http.client
 import traceback
 from pathlib import Path
-from typing import Optional, Any, Annotated
-from dataclasses import dataclass, asdict
+from typing import Optional, Any, Annotated, Callable
+from dataclasses import dataclass, asdict, field
 from urllib.parse import urlparse
 
 # Import zeromcp from ida_mcp package
@@ -262,6 +262,7 @@ class Session:
     created_at: float
     error_message: Optional[str] = None
     analysis_time: Optional[float] = None  # Time taken for analysis in seconds
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -270,7 +271,7 @@ class Session:
 class SessionMcpServer:
     """MCP Server with integrated session management"""
 
-    def __init__(self, unsafe: bool = False, verbose: bool = False, disable_user_plugins: bool = True):
+    def __init__(self, unsafe: bool = False, verbose: bool = False, disable_user_plugins: bool = True, mcp_event_callback: Callable[[str, dict[str, Any]], None] | None = None):
         self.mcp = McpServer("ida-pro-mcp-session")
         self.sessions: dict[str, Session] = {}
         self.processes: dict[str, subprocess.Popen] = {}
@@ -278,6 +279,7 @@ class SessionMcpServer:
         self.unsafe = unsafe
         self.verbose = verbose
         self.disable_user_plugins = disable_user_plugins
+        self.mcp_event_callback = mcp_event_callback
         self._lock = threading.Lock()
         self._port_counter = SESSION_PORT_START
         self._snapshot_root = (Path.cwd() / '.ida-session-snapshots').resolve()
@@ -312,6 +314,8 @@ class SessionMcpServer:
             try:
                 session = self._create_session(binary_path)
                 self.active_session_id = session.session_id
+                if self.mcp_event_callback is not None:
+                    self.mcp_event_callback("session_open", {"session": session.to_dict(), "requested_path": binary_path})
                 return {
                     "success": True,
                     "session": session.to_dict(),
@@ -381,8 +385,14 @@ class SessionMcpServer:
             Terminates the idalib process and removes the session.
             If the closed session was active, no session will be active.
             """
+            session_info = None
+            with self._lock:
+                if session_id in self.sessions:
+                    session_info = self.sessions[session_id].to_dict()
             success = self._destroy_session(session_id)
             if success:
+                if self.mcp_event_callback is not None:
+                    self.mcp_event_callback("session_close", {"session_id": session_id, "session": session_info})
                 return {
                     "success": True,
                     "message": f"Session {session_id} closed",
@@ -742,6 +752,7 @@ class SessionMcpServer:
             live_notify_url=live_notify_url,
             notify_project_id=notify_project_id,
             notify_binary_id=notify_binary_id,
+            source_binary_path=binary_path,
         )
 
     def _spawn_session(
@@ -750,6 +761,8 @@ class SessionMcpServer:
         live_notify_url: str | None = None,
         notify_project_id: str | None = None,
         notify_binary_id: str | None = None,
+        source_binary_path: str | None = None,
+        snapshot_of: str | None = None,
     ) -> Session:
         binary_path = os.path.abspath(binary_path)
 
@@ -802,6 +815,12 @@ class SessionMcpServer:
             pid=process.pid,
             status="starting",
             created_at=time.time(),
+            metadata={
+                "requested_path": os.path.abspath(source_binary_path or binary_path),
+                "source_binary_path": os.path.abspath(source_binary_path or binary_path),
+                "open_path": binary_path,
+                "snapshot_of": os.path.abspath(snapshot_of) if snapshot_of else None,
+            },
         )
 
         with self._lock:
@@ -841,6 +860,8 @@ class SessionMcpServer:
                 live_notify_url=live_notify_url,
                 notify_project_id=notify_project_id,
                 notify_binary_id=notify_binary_id,
+                source_binary_path=binary_path,
+                snapshot_of=binary_path,
             )
 
     def _wait_for_session_ready(self, session_id: str, timeout: float = 120):

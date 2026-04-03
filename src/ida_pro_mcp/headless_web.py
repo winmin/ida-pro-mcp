@@ -5,6 +5,7 @@ import atexit
 import shutil
 import json
 import logging
+import signal
 import threading
 import time
 from datetime import datetime, timezone
@@ -1944,9 +1945,10 @@ window.addEventListener('load', async () => {
 
 
 class HeadlessWebBackend:
-    def __init__(self, db_path: Path, unsafe: bool = False, verbose: bool = False, notifier: LiveUpdateHub | None = None, notify_api_url: str | None = None, disable_user_plugins: bool = True):
+    def __init__(self, db_path: Path, unsafe: bool = False, verbose: bool = False, notifier: LiveUpdateHub | None = None, notify_api_url: str | None = None, disable_user_plugins: bool = True, default_project_name: str = "default"):
         self.store = HeadlessProjectStore(db_path)
-        self.sessions = SessionMcpServer(unsafe=unsafe, verbose=verbose, disable_user_plugins=disable_user_plugins)
+        self.default_project_name = default_project_name
+        self.sessions = SessionMcpServer(unsafe=unsafe, verbose=verbose, disable_user_plugins=disable_user_plugins, mcp_event_callback=self._handle_session_mcp_event)
         self.notifier = notifier
         self.notify_api_url = notify_api_url
         self._reconcile_session_rows()
@@ -1998,11 +2000,117 @@ class HeadlessWebBackend:
                 return record
         return None
 
+    def _find_binary_for_runtime_record(self, live_record: dict[str, Any]) -> dict[str, Any] | None:
+        metadata = live_record.get('metadata') or {}
+        candidate_paths = {
+            self._normalized_path(live_record.get('binary_path')),
+            self._normalized_path(metadata.get('source_binary_path')),
+            self._normalized_path(metadata.get('requested_path')),
+            self._normalized_path(metadata.get('snapshot_of')),
+        }
+        candidate_paths.discard(None)
+        for project in self.store.list_projects():
+            for binary in self.store.list_binaries(project['project_id']):
+                known_paths = {
+                    self._normalized_path(binary.get('binary_path')),
+                    self._normalized_path(binary.get('idb_path')),
+                }
+                try:
+                    known_paths.add(self._normalized_path(self._resolve_open_path(binary)))
+                except Exception:
+                    pass
+                known_paths.discard(None)
+                if candidate_paths & known_paths:
+                    return binary
+        return None
+
+    def _ensure_binary_for_runtime_record(self, live_record: dict[str, Any]) -> dict[str, Any]:
+        binary = self._find_binary_for_runtime_record(live_record)
+        if binary is not None:
+            return binary
+        metadata = live_record.get('metadata') or {}
+        preferred_path = metadata.get('snapshot_of') or metadata.get('source_binary_path') or metadata.get('requested_path') or live_record.get('binary_path')
+        if not preferred_path:
+            raise RuntimeError(f'Unable to infer binary path for runtime session {live_record.get("session_id")}')
+        project = self.ensure_project(self.default_project_name)
+        return self.store.add_binary(project['project_id'], preferred_path, Path(preferred_path).name)
+
+    def _sync_runtime_session(self, runtime_session_id: str) -> dict[str, Any] | None:
+        live_record = self._live_runtime_map().get(runtime_session_id)
+        if live_record is None:
+            return None
+        session = self.store.get_session(runtime_session_id)
+        if session is not None:
+            return self._enrich_session_record(session)
+        binary = self._ensure_binary_for_runtime_record(live_record)
+        metadata = live_record.get('metadata') or {}
+        source_open_path = metadata.get('source_binary_path') or live_record.get('binary_path')
+        snapshot_of = metadata.get('snapshot_of')
+        self.store.record_session_open(
+            project_id=binary['project_id'],
+            binary_id=binary['binary_id'],
+            runtime_session_id=runtime_session_id,
+            worker_port=live_record.get('port'),
+            worker_pid=live_record.get('pid'),
+            status=live_record.get('status', 'ready'),
+            metadata={
+                'binary_path': binary['binary_path'],
+                'open_path': live_record.get('binary_path'),
+                'source_open_path': source_open_path,
+                'snapshot_of': snapshot_of,
+                'reuse_count': 0,
+                'registered_by': 'runtime_reconcile',
+            },
+        )
+        open_path = Path(str(source_open_path)).expanduser().resolve()
+        if open_path.suffix.lower() in {'.i64', '.idb'}:
+            self.store.update_binary_idb_path(binary['binary_id'], open_path)
+        else:
+            guessed = self.store._guess_idb_path(Path(binary['binary_path']))
+            if guessed is not None:
+                self.store.update_binary_idb_path(binary['binary_id'], guessed)
+        return self._enrich_session_record(self.store.get_session(runtime_session_id) or {})
+
     def _reconcile_session_rows(self) -> None:
         live_ids = set(self._live_runtime_map())
+        for runtime_session_id in live_ids:
+            self._sync_runtime_session(runtime_session_id)
         for session in self.store.list_sessions(include_closed=False):
             if session['runtime_session_id'] not in live_ids:
                 self.store.record_session_close(session['runtime_session_id'], status='stale')
+
+    def _handle_session_mcp_event(self, event: str, payload: dict[str, Any]) -> None:
+        if event == 'session_open':
+            session = payload.get('session') or {}
+            runtime_session_id = session.get('session_id')
+            if not runtime_session_id:
+                return
+            synced = self._sync_runtime_session(runtime_session_id)
+            if synced is not None:
+                self._publish_event(
+                    'operation',
+                    operation_type='session_open',
+                    project_id=synced.get('project_id'),
+                    binary_id=synced.get('binary_id'),
+                    runtime_session_id=runtime_session_id,
+                    target=session.get('binary_path'),
+                )
+            return
+        if event == 'session_close':
+            runtime_session_id = payload.get('session_id')
+            if not runtime_session_id:
+                return
+            session = self.store.get_session(runtime_session_id)
+            if session is not None:
+                self.store.record_session_close(runtime_session_id)
+                self._publish_event(
+                    'operation',
+                    operation_type='session_close',
+                    project_id=session.get('project_id'),
+                    binary_id=session.get('binary_id'),
+                    runtime_session_id=runtime_session_id,
+                    target=runtime_session_id,
+                )
 
     def _session_row_for_live_runtime(self, binary_id: str, live_record: dict[str, Any]) -> dict[str, Any]:
         session = self.store.get_session(live_record['session_id'])
@@ -2359,7 +2467,7 @@ class HeadlessWebBackend:
         for item in items:
             item['live'] = live_map.get(item['runtime_session_id'])
             self._enrich_session_record(item)
-        return {'sessions': items}
+        return {'sessions': items, 'live_count': sum(1 for item in items if item.get('live'))}
 
     def list_snapshots(self, binary_id: str) -> dict[str, Any]:
         binary = self._require_binary(binary_id)
@@ -3184,6 +3292,24 @@ class HeadlessApiHandler(BaseHTTPRequestHandler):
         logger.info('%s - %s', self.address_string(), format % args)
 
 
+def _build_http_server(host: str, port: int, backend: HeadlessWebBackend, ws_port: int) -> ThreadingHTTPServer:
+    handler = type('BoundHeadlessApiHandler', (HeadlessApiHandler,), {'backend': backend, 'ws_port': ws_port})
+    return ThreadingHTTPServer((host, port), handler)
+
+
+def _serve_http_background(server: ThreadingHTTPServer) -> tuple[threading.Thread, threading.Event]:
+    ready = threading.Event()
+
+    def _run() -> None:
+        ready.set()
+        server.serve_forever()
+
+    thread = threading.Thread(target=_run, name='headless-web-http', daemon=True)
+    thread.start()
+    ready.wait(timeout=5)
+    return thread, ready
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description='Headless IDA project/session web manager')
     parser.add_argument('--host', default='127.0.0.1')
@@ -3194,6 +3320,7 @@ def main() -> None:
     parser.add_argument('--artifact', action='append', default=[], help='Artifact (.i64/.idb/binary) to restore on startup; may be repeated')
     parser.add_argument('--open-session', action='store_true', help='Open a live session for startup artifacts')
     parser.add_argument('--refresh-on-start', action='store_true', help='Refresh indexes for startup artifacts after opening sessions')
+    parser.add_argument('--mcp-stdio', action='store_true', help='Expose the same in-process SessionMcpServer over stdio so Codex MCP and the web UI share one backend')
     parser.add_argument('--unsafe', action='store_true')
     parser.add_argument('--allow-user-plugins', action='store_true', help='Allow loading user plugins from ~/.idapro in spawned headless workers')
     parser.add_argument('--verbose', '-v', action='store_true')
@@ -3216,8 +3343,36 @@ def main() -> None:
         notifier=notifier,
         notify_api_url=notify_api_url,
         disable_user_plugins=not args.allow_user_plugins,
+        default_project_name=args.project_name,
     )
-    atexit.register(backend.shutdown)
+
+    server = _build_http_server(args.host, args.port, backend, ws_port)
+
+    _cleanup_done = False
+
+    def _do_cleanup() -> None:
+        nonlocal _cleanup_done
+        if _cleanup_done:
+            return
+        _cleanup_done = True
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        try:
+            server.server_close()
+        except Exception:
+            pass
+        backend.shutdown()
+
+    atexit.register(_do_cleanup)
+
+    def _signal_handler(signum, frame) -> None:
+        logger.info('Received signal %s, shutting down...', signum)
+        threading.Thread(target=_do_cleanup, daemon=True).start()
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
 
     if args.artifact:
         boot = backend.bootstrap_artifacts(
@@ -3233,16 +3388,25 @@ def main() -> None:
             boot['project']['name'],
         )
 
-    handler = type('BoundHeadlessApiHandler', (HeadlessApiHandler,), {'backend': backend, 'ws_port': ws_port})
-    server = ThreadingHTTPServer((args.host, args.port), handler)
     logger.info('Headless web manager listening on http://%s:%d', args.host, args.port)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-        backend.shutdown()
+    if args.mcp_stdio:
+        http_thread, _ = _serve_http_background(server)
+        logger.info('Shared stdio MCP enabled; Codex MCP and the web UI now share the same SessionMcpServer')
+        try:
+            backend.sessions.stdio()
+        except (KeyboardInterrupt, EOFError):
+            pass
+        finally:
+            _do_cleanup()
+            if http_thread.is_alive():
+                http_thread.join(timeout=1)
+    else:
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            _do_cleanup()
 
 
 if __name__ == '__main__':

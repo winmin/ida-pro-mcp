@@ -1,30 +1,16 @@
 name: idalib-tests
 on:
+  workflow_dispatch:
   push:
-  pull_request_target:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
-  approval:
-    # Only gate fork PRs. Pushes run normally, and same-repo contributors use
-    # normal push CI instead of pull_request_target.
-    if: |
-      github.event_name == 'pull_request_target' &&
-      github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
-    environment: external-pr
-    steps:
-      - name: Approval granted
-        run: echo "Approved to run fork PR tests"
-
   idalib-tests:
-    # Run on all pushes, and on fork PRs only after the approval job passes.
-    if: |
-      always() &&
-      (
-        github.event_name == 'push' ||
-        needs.approval.result == 'success'
-      )
-    needs: approval
+    # This workflow depends on the upstream GHCR image and is noisy/broken on
+    # forks. Keep it active only for the canonical upstream repository.
+    if: github.repository == 'mrexodia/ida-pro-mcp'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -38,9 +24,7 @@ jobs:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v7
 

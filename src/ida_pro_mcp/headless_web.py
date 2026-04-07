@@ -559,6 +559,30 @@ code, .mono { font-family: var(--mono); }
   padding: 14px;
   min-height: 100%;
 }
+.code-view pre, #detailsOutput {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  tab-size: 4;
+}
+.syntax-plain { color: var(--text); }
+.syntax-comment { color: #6a9955; font-style: italic; }
+.syntax-string { color: #ce9178; }
+.syntax-number { color: #b5cea8; }
+.syntax-keyword { color: #569cd6; }
+.syntax-type { color: #4ec9b0; }
+.syntax-register { color: #d7ba7d; }
+.syntax-mnemonic { color: #c586c0; font-weight: 600; }
+.syntax-symbol { color: #9cdcfe; }
+.syntax-jump {
+  color: #4fc1ff;
+  cursor: pointer;
+  text-decoration: underline dotted rgba(79, 193, 255, 0.45);
+}
+.syntax-error { color: #f48771; }
 .table {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -686,10 +710,10 @@ code, .mono { font-family: var(--mono); }
       </div>
       <div class='views'>
         <section id='view-decompile' class='view'>
-          <div class='code-view'><pre id='decompileOutput'>Select a function or use Go to load pseudocode.</pre></div>
+          <div class='code-view'><pre id='decompileOutput' onclick='onCodeBlockClick(event)'>Select a function or use Go to load pseudocode.</pre></div>
         </section>
         <section id='view-disasm' class='view'>
-          <div class='code-view'><pre id='disasmOutput'>Select a function or use Go to load disassembly.</pre></div>
+          <div class='code-view'><pre id='disasmOutput' onclick='onCodeBlockClick(event)'>Select a function or use Go to load disassembly.</pre></div>
         </section>
         <section id='view-strings' class='view'>
           <div id='stringsTable'></div>
@@ -795,6 +819,246 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+const C_KEYWORDS = new Set([
+  'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'break',
+  'continue', 'return', 'goto', 'sizeof', 'struct', 'union', 'enum', 'typedef',
+  'const', 'static', 'volatile', 'extern', 'inline', '__fastcall', '__cdecl',
+  '__stdcall', '__noreturn', '__spoils', '__usercall', '__userpurge'
+]);
+const C_TYPES = new Set([
+  'void', 'bool', 'char', 'short', 'int', 'long', 'float', 'double', 'signed',
+  'unsigned', '__int8', '__int16', '__int32', '__int64', 'size_t', 'ssize_t',
+  '_byte', '_word', '_dword', '_qword', '_oword'
+]);
+const ASM_MNEMONICS = new Set([
+  'mov', 'lea', 'push', 'pop', 'call', 'jmp', 'jz', 'jnz', 'je', 'jne', 'ja',
+  'jae', 'jb', 'jbe', 'jg', 'jge', 'jl', 'jle', 'test', 'cmp', 'xor', 'or',
+  'and', 'add', 'sub', 'imul', 'mul', 'idiv', 'div', 'inc', 'dec', 'nop',
+  'ret', 'retn', 'leave', 'shl', 'shr', 'sar', 'rol', 'ror', 'not', 'neg',
+  'cmovz', 'cmovnz', 'setz', 'setnz', 'movzx', 'movsx'
+]);
+const ASM_REGISTERS = /(\\b(?:r(?:[0-9]|1[0-5]|[abcd]x|[sb]p|[sd]i)|e(?:[abcd]x|[sb]p|[sd]i|ip|flags)|[abcd][lh]|[cdefgs]s|[sd]s|[sb]p|[sd]i|xmm\\d+|ymm\\d+|zmm\\d+|mm\\d+|st\\(\\d+\\)|rip|eip|rsp|esp|rbp|ebp|rax|rbx|rcx|rdx)\\b)/gi;
+
+function wrapSyntax(cls, text) {
+  return `<span class="${cls}">${escapeHtml(text)}</span>`;
+}
+
+function makeJumpSpan(query, text) {
+  return `<span class="syntax-jump" data-jump-query="${encodeURIComponent(query)}">${escapeHtml(text)}</span>`;
+}
+
+function isIdentifierStart(ch) {
+  return /[A-Za-z_]/.test(ch);
+}
+
+function isIdentifierPart(ch) {
+  return /[A-Za-z0-9_.$?@]/.test(ch);
+}
+
+function isRegisterToken(token) {
+  return /^(?:r(?:[0-9]|1[0-5]|[abcd]x|[sb]p|[sd]i)|e(?:[abcd]x|[sb]p|[sd]i|ip|flags)|[abcd][lh]|[cdefgs]s|[sd]s|[sb]p|[sd]i|xmm\d+|ymm\d+|zmm\d+|mm\d+|st\(\d+\)|rip|eip|rsp|esp|rbp|ebp|rax|rbx|rcx|rdx)$/i.test(token);
+}
+
+function isJumpMnemonic(token) {
+  const lower = String(token || '').toLowerCase();
+  return lower === 'call' || lower === 'jmp' || /^j[a-z]+$/.test(lower);
+}
+
+function highlightPlainSegment(text, mode, options = {}) {
+  const source = String(text ?? '');
+  const jumpIdentifiers = options.jumpIdentifiers || false;
+  const forceJump = options.forceJump || false;
+  let html = '';
+  let i = 0;
+
+  while (i < source.length) {
+    const ch = source[i];
+    if (/\s/.test(ch)) {
+      html += escapeHtml(ch);
+      i += 1;
+      continue;
+    }
+
+    const hexMatch = source.slice(i).match(/^0x[0-9a-fA-F]+/);
+    if (hexMatch) {
+      const token = hexMatch[0];
+      html += forceJump ? makeJumpSpan(token, token) : `<span class="syntax-number">${token}</span>`;
+      i += token.length;
+      continue;
+    }
+
+    const numMatch = source.slice(i).match(/^\d+/);
+    if (numMatch) {
+      const token = numMatch[0];
+      html += `<span class="syntax-number">${token}</span>`;
+      i += token.length;
+      continue;
+    }
+
+    if (isIdentifierStart(ch)) {
+      let j = i + 1;
+      while (j < source.length && isIdentifierPart(source[j])) j += 1;
+      const token = source.slice(i, j);
+      const lower = token.toLowerCase();
+      let rendered = escapeHtml(token);
+
+      if (mode === 'asm') {
+        if (isRegisterToken(token)) {
+          rendered = `<span class="syntax-register">${escapeHtml(token)}</span>`;
+        } else if (forceJump && !ASM_MNEMONICS.has(lower)) {
+          rendered = makeJumpSpan(token, token);
+        }
+      } else if (C_TYPES.has(token)) {
+        rendered = `<span class="syntax-type">${escapeHtml(token)}</span>`;
+      } else if (C_KEYWORDS.has(token)) {
+        rendered = `<span class="syntax-keyword">${escapeHtml(token)}</span>`;
+      } else if (jumpIdentifiers) {
+        let k = j;
+        while (k < source.length && /\s/.test(source[k])) k += 1;
+        if (source[k] === '(') {
+          rendered = makeJumpSpan(token, token);
+        }
+      }
+
+      html += rendered;
+      i = j;
+      continue;
+    }
+
+    html += escapeHtml(ch);
+    i += 1;
+  }
+
+  return html;
+}
+
+function highlightAsmOperands(text, mnemonic) {
+  return highlightPlainSegment(text, 'asm', {forceJump: isJumpMnemonic(mnemonic)});
+}
+
+function highlightAsmLine(line) {
+  if (!line) return '';
+  let code = line;
+  let comment = '';
+  const commentIndex = line.indexOf(';');
+  if (commentIndex >= 0) {
+    code = line.slice(0, commentIndex);
+    comment = line.slice(commentIndex);
+  }
+
+  let output = '';
+  let rest = code;
+  const labelMatch = rest.match(/^(\\s*[A-Za-z_.$?@][\\w.$?@]*:)(\\s*)/);
+  if (labelMatch) {
+    output += wrapSyntax('syntax-symbol', labelMatch[1]) + escapeHtml(labelMatch[2]);
+    rest = rest.slice(labelMatch[0].length);
+  }
+
+  const mnemonicMatch = rest.match(/^(\\s*)([A-Za-z][A-Za-z0-9_.]{1,14})(\\b)([\\s\\S]*)$/);
+  if (mnemonicMatch && ASM_MNEMONICS.has(mnemonicMatch[2].toLowerCase())) {
+    output += escapeHtml(mnemonicMatch[1]);
+    output += wrapSyntax('syntax-mnemonic', mnemonicMatch[2]);
+    output += highlightAsmOperands(mnemonicMatch[4], mnemonicMatch[2]);
+  } else {
+    output += highlightPlainSegment(rest, 'asm');
+  }
+
+  if (comment) {
+    output += wrapSyntax('syntax-comment', comment);
+  }
+  return output;
+}
+
+function highlightCode(text, mode = 'plain') {
+  const source = String(text ?? '');
+  if (!source) return `<span class="syntax-plain"></span>`;
+  if (mode === 'asm') {
+    return source.split('\\n').map((line) => highlightAsmLine(line)).join('\\n');
+  }
+
+  const parts = [];
+  let cursor = 0;
+  while (cursor < source.length) {
+    const char = source[cursor];
+    const next = source[cursor + 1];
+    if (char === '/' && next === '/') {
+      const end = source.indexOf('\\n', cursor);
+      const sliceEnd = end === -1 ? source.length : end;
+      parts.push({kind: 'comment', text: source.slice(cursor, sliceEnd)});
+      cursor = sliceEnd;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      const end = source.indexOf('*/', cursor + 2);
+      const sliceEnd = end === -1 ? source.length : end + 2;
+      parts.push({kind: 'comment', text: source.slice(cursor, sliceEnd)});
+      cursor = sliceEnd;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      const quote = char;
+      let end = cursor + 1;
+      while (end < source.length) {
+        if (source[end] === '\\\\') {
+          end += 2;
+          continue;
+        }
+        if (source[end] === quote) {
+          end += 1;
+          break;
+        }
+        end += 1;
+      }
+      parts.push({kind: 'string', text: source.slice(cursor, end)});
+      cursor = end;
+      continue;
+    }
+    let end = cursor + 1;
+    while (end < source.length) {
+      const current = source[end];
+      const following = source[end + 1];
+      if ((current === '/' && (following === '/' || following === '*')) || current === '"' || current === "'") {
+        break;
+      }
+      end += 1;
+    }
+    parts.push({kind: 'code', text: source.slice(cursor, end)});
+    cursor = end;
+  }
+
+  return parts.map((part) => {
+    if (part.kind === 'comment') return wrapSyntax('syntax-comment', part.text);
+    if (part.kind === 'string') return wrapSyntax('syntax-string', part.text);
+    return highlightPlainSegment(part.text, 'c', {jumpIdentifiers: true});
+  }).join('');
+}
+
+function renderCodeBlock(elementId, text, mode = 'plain', error = false) {
+  const element = document.getElementById(elementId);
+  if (!element) return;
+  if (error) {
+    element.innerHTML = `<span class="syntax-error">${escapeHtml(text)}</span>`;
+    return;
+  }
+  element.innerHTML = highlightCode(text, mode);
+}
+
+async function jumpToQuery(query) {
+  if (!query) return;
+  document.getElementById('gotoInput').value = query;
+  await lookupAndOpen(query);
+}
+
+function onCodeBlockClick(event) {
+  const target = event.target.closest('[data-jump-query]');
+  if (!target) return;
+  const query = decodeURIComponent(target.getAttribute('data-jump-query') || '');
+  if (!query) return;
+  event.preventDefault();
+  event.stopPropagation();
+  jumpToQuery(query);
 }
 
 function setStatus(message, meta = '', isError = false) {
@@ -1553,8 +1817,8 @@ function selectHistoryEntry(item) {
   setTab('history');
 }
 
-async function lookupAndOpen() {
-  const query = document.getElementById('gotoInput').value.trim();
+async function lookupAndOpen(explicitQuery = '') {
+  const query = explicitQuery || document.getElementById('gotoInput').value.trim();
   if (!query) return setStatus('Enter an address or symbol.', '', true);
   if (!state.selectedSessionId) return setStatus('Start a session first.', '', true);
   const payload = await api(`/api/sessions/${state.selectedSessionId}/lookup?query=${encodeURIComponent(query)}`);
@@ -1623,27 +1887,27 @@ async function loadLookupDetails(query) {
 
 async function loadDecompiler(addr) {
   if (!state.selectedSessionId || !addr) {
-    document.getElementById('decompileOutput').textContent = 'Start a session and select a function to view pseudocode.';
+    renderCodeBlock('decompileOutput', 'Start a session and select a function to view pseudocode.');
     return;
   }
   try {
     const payload = await api(`/api/sessions/${state.selectedSessionId}/decompile?addr=${encodeURIComponent(addr)}`);
-    document.getElementById('decompileOutput').textContent = extractTextBlock(payload.result ?? payload);
+    renderCodeBlock('decompileOutput', extractTextBlock(payload.result ?? payload), 'c');
   } catch (err) {
-    document.getElementById('decompileOutput').textContent = `Decompiler error: ${err.message}`;
+    renderCodeBlock('decompileOutput', `Decompiler error: ${err.message}`, 'plain', true);
   }
 }
 
 async function loadDisasm(addr) {
   if (!state.selectedSessionId || !addr) {
-    document.getElementById('disasmOutput').textContent = 'Start a session and select a function to view disassembly.';
+    renderCodeBlock('disasmOutput', 'Start a session and select a function to view disassembly.');
     return;
   }
   try {
     const payload = await api(`/api/sessions/${state.selectedSessionId}/disasm?addr=${encodeURIComponent(addr)}`);
-    document.getElementById('disasmOutput').textContent = extractTextBlock(payload.result ?? payload);
+    renderCodeBlock('disasmOutput', extractTextBlock(payload.result ?? payload), 'asm');
   } catch (err) {
-    document.getElementById('disasmOutput').textContent = `Disassembly error: ${err.message}`;
+    renderCodeBlock('disasmOutput', `Disassembly error: ${err.message}`, 'plain', true);
   }
 }
 

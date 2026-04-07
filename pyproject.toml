@@ -21,11 +21,13 @@ classifiers = [
 dependencies = [
     "idapro>=0.0.7",
     "tomli-w>=1.0.0",
+    "websockets>=11.0",
 ]
 
 [dependency-groups]
 dev = [
     "coverage>=7.13.4",
+    "pytest>=9.0.2",
 ]
 
 [project.urls]
@@ -49,6 +51,9 @@ include = ["src/ida_pro_mcp"]
 
 [tool.ruff]
 exclude = ["src/ida_pro_mcp/ida_mcp/zeromcp/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.coverage.run]
 relative_files = true

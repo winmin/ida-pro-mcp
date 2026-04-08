@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>IDA Workspace</title>
+<link rel='stylesheet' href='/static/workspace.css'>
+</head>
+<body>
+<div class='app'>
+  <header class='topbar'>
+    <div class='brand'>
+      <span>IDA Workspace</span>
+      <small>headless · upstream ida tools</small>
+    </div>
+    <div id='selectionPill' class='pill'>No binary selected</div>
+  </header>
+
+  <div class='commandbar'>
+    <div class='group'>
+      <input id='projectName' placeholder='New project name'>
+      <button class='primary' onclick='createProject()'>Create Project</button>
+    </div>
+    <div class='group'>
+      <input id='artifactPath' placeholder='/path/to/binary or .i64'>
+      <button onclick='addBinary()'>Add Binary</button>
+      <button onclick='restoreArtifact()'>Restore</button>
+    </div>
+    <div class='group'>
+      <button id='navBackBtn' class='ghost' onclick='navigateHistory("back")' title='Back'>←</button>
+      <button id='navForwardBtn' class='ghost' onclick='navigateHistory("forward")' title='Forward'>→</button>
+      <button id='startSessionBtn' onclick='openSession()'>Start Session</button>
+      <button id='refreshIndexesBtn' onclick='refreshIndexes()'>Refresh Indexes</button>
+      <input id='gotoInput' placeholder='Address or symbol'>
+      <button onclick='lookupAndOpen()'>Go</button>
+    </div>
+  </div>
+
+  <div class='layout'>
+    <aside class='sidebar'>
+      <div class='column'>
+        <section class='panel compact workspace-panel'>
+          <div class='panel-header'>
+            <div class='panel-title'>Workspace</div>
+            <span id='sessionBadge' class='badge warn'>No live session</span>
+          </div>
+          <div class='panel-body'>
+            <div id='workspaceMeta' class='workspace-summary'></div>
+          </div>
+        </section>
+
+        <section class='panel projects-panel'>
+          <div class='panel-header'>
+            <div class='panel-title'>Projects</div>
+            <button class='ghost' onclick='refreshWorkspace()'>Refresh</button>
+          </div>
+          <div class='panel-body'>
+            <div id='projectTree' class='tree'></div>
+          </div>
+        </section>
+
+        <section class='panel fill explorer-panel'>
+          <div class='panel-header'>
+            <div class='panel-title'>Explorer</div>
+            <div id='indexBadges' class='row wrap'></div>
+          </div>
+          <div class='panel-body'>
+            <div class='segmented'>
+              <button id='resource-functions' onclick="setResourceMode('functions')">Functions</button>
+              <button id='resource-strings' onclick="setResourceMode('strings')">Strings</button>
+              <button id='resource-structs' onclick="setResourceMode('structs')">Structs</button>
+              <button id='resource-history' onclick="setResourceMode('history')">History</button>
+            </div>
+            <input id='resourceFilter' placeholder='Filter current explorer' oninput='onResourceFilterChange()'>
+            <div id='resourceList' class='list'></div>
+          </div>
+        </section>
+      </div>
+    </aside>
+
+    <div id='splitter-left' class='splitter' data-side='left' title='Drag to resize panels'></div>
+
+    <main class='editor'>
+      <div class='tabs'>
+        <button id='tab-decompile' class='tab' onclick="setTab('decompile')">Decompiler</button>
+        <button id='tab-disasm' class='tab' onclick="setTab('disasm')">Disassembly</button>
+        <button id='tab-strings' class='tab' onclick="setTab('strings')">Strings</button>
+        <button id='tab-structs' class='tab' onclick="setTab('structs')">Structs</button>
+        <button id='tab-history' class='tab' onclick="setTab('history')">History</button>
+      </div>
+      <div class='views'>
+        <section id='view-decompile' class='view'>
+          <div class='code-view'><div id='decompileOutput' class='code-output' onclick='onCodeBlockClick(event)'>Select a function or use Go to load pseudocode.</div></div>
+        </section>
+        <section id='view-disasm' class='view'>
+          <div class='code-view'><div id='disasmOutput' class='code-output' onclick='onCodeBlockClick(event)'>Select a function or use Go to load disassembly.</div></div>
+        </section>
+        <section id='view-strings' class='view'>
+          <div id='stringsTable'></div>
+        </section>
+        <section id='view-structs' class='view'>
+          <div id='structsTable'></div>
+        </section>
+        <section id='view-history' class='view'>
+          <div id='historyTable'></div>
+        </section>
+      </div>
+    </main>
+
+    <div id='splitter-right' class='splitter' data-side='right' title='Drag to resize panels'></div>
+
+    <aside class='inspector'>
+      <div class='column'>
+        <section class='panel'>
+          <div class='panel-header'><div class='panel-title'>Inspector</div></div>
+          <div class='panel-body'>
+            <div id='inspectorSummary' class='meta-grid'></div>
+          </div>
+        </section>
+
+        <section class='panel'>
+          <div class='panel-header'>
+            <div class='panel-title'>Xrefs</div>
+            <button class='ghost' onclick='refreshInspectorXrefs()'>Refresh</button>
+          </div>
+          <div class='panel-body'>
+            <div id='xrefsList' class='list'></div>
+          </div>
+        </section>
+
+        <section class='panel'>
+          <div class='panel-header'><div class='panel-title'>Actions</div></div>
+          <div class='panel-body' style='display:flex;flex-direction:column;gap:10px;'>
+            <div>
+              <div class='small' style='margin-bottom:4px;'>Rename selected address</div>
+              <div class='row'>
+                <input id='renameInput' placeholder='new_symbol_name'>
+                <button onclick='renameSelected()'>Save</button>
+              </div>
+            </div>
+            <div>
+              <div class='small' style='margin-bottom:4px;'>Comment selected address</div>
+              <textarea id='commentInput' placeholder='Comment text'></textarea>
+              <div class='row' style='margin-top:8px;'>
+                <button onclick='commentSelected()'>Save Comment</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class='panel'>
+          <div class='panel-header'><div class='panel-title'>Snapshots</div></div>
+          <div class='panel-body'>
+            <div id='snapshotList' class='list'></div>
+          </div>
+        </section>
+
+        <section class='panel fill'>
+          <div class='panel-header'><div class='panel-title'>Details</div></div>
+          <div class='panel-body' style='min-height:280px;'>
+            <pre id='detailsOutput'>No selection.</pre>
+          </div>
+        </section>
+      </div>
+    </aside>
+  </div>
+
+<footer class='statusbar'>
+  <span id='statusText'>Ready.</span>
+  <span id='statusMeta' class='muted'></span>
+</footer>
+</div>
+
+<div id='hoverPreview' class='hover-preview hidden'></div>
+
+<script>window.__HEADLESS_WEB_BOOT__ = { initialBinaryId: __INITIAL_BINARY_ID__, liveWsPort: __LIVE_WS_PORT__ };</script>
+<script src='/static/workspace.js'></script>
+</body>
+</html>

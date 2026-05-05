@@ -433,6 +433,7 @@ class McpServer:
         self.registry.methods["resources/read"] = self._mcp_resources_read
         self.registry.methods["prompts/list"] = self._mcp_prompts_list
         self.registry.methods["prompts/get"] = self._mcp_prompts_get
+        self.registry.methods["notifications/initialized"] = self._mcp_notifications_initialized
         self.registry.methods["notifications/cancelled"] = self._mcp_notifications_cancelled
 
     def tool(self, func: Callable) -> Callable:
@@ -458,7 +459,9 @@ class McpServer:
             server_cls = UnixThreadingHTTPServer if background else UnixHTTPServer
             server_address: str | tuple[str, int] = unix_socket
         else:
-            server_cls = ThreadingHTTPServer if background else HTTPServer
+            # SSE uses a long-lived GET stream plus follow-up POST requests,
+            # so foreground TCP servers still need concurrent request handling.
+            server_cls = ThreadingHTTPServer
             server_address = (host, port)
 
         self._http_server = server_cls(
@@ -659,6 +662,10 @@ class McpServer:
         finally:
             if request_id is not None:
                 unregister_pending_request(request_id)
+
+    def _mcp_notifications_initialized(self, _meta: dict | None = None) -> None:
+        """MCP notifications/initialized - acknowledge client readiness"""
+        return None
 
     def _mcp_notifications_cancelled(self, requestId: int | str, reason: str | None = None) -> None:
         """MCP notifications/cancelled - cancel an in-flight request"""

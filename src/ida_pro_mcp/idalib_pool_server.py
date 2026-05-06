@@ -50,6 +50,15 @@ from ida_pro_mcp.idalib_pool_manager import PoolManager  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+def _default_open_timeout_sec() -> float | None:
+    value = os.environ.get("IDA_MCP_OPEN_TIMEOUT_SEC", "").strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
 # --------------------------------------------------------------------------
 # Management tool names that the proxy intercepts
 # --------------------------------------------------------------------------
@@ -61,6 +70,7 @@ IDALIB_MANAGEMENT_TOOLS = {
     "idalib_unbind",
     "idalib_list",
     "idalib_current",
+    "idalib_pool_status",
     "idalib_save",
     "idalib_health",
     "idalib_warmup",
@@ -78,6 +88,21 @@ _SESSION_ID_SCHEMA: dict = {
     ),
 }
 
+_LOCAL_TOOL_SCHEMAS: list[dict] = [
+    {
+        "name": "idalib_pool_status",
+        "description": (
+            "Return pool proxy status, backend instance PIDs/endpoints/log paths, "
+            "open timeout, sessions, and current in-flight operations."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    }
+]
+
 
 def _prepare_tools(tools: list[dict]) -> list[dict]:
     """Prepare tool schemas for the proxy.
@@ -87,15 +112,20 @@ def _prepare_tools(tools: list[dict]) -> list[dict]:
     ``session_id`` parameter injected so clients can route per-tool.
     """
     result = []
+    seen_names: set[str] = set()
     for tool in tools:
         tool = copy.deepcopy(tool)
         name = tool.get("name", "")
+        seen_names.add(name)
         if name not in IDALIB_MANAGEMENT_TOOLS:
             schema = tool.setdefault("inputSchema", {})
             props = schema.setdefault("properties", {})
             if "session_id" not in props:
                 props["session_id"] = _SESSION_ID_SCHEMA
         result.append(tool)
+    for tool in _LOCAL_TOOL_SCHEMAS:
+        if tool["name"] not in seen_names:
+            result.append(copy.deepcopy(tool))
     return result
 
 
@@ -157,6 +187,9 @@ def build_dispatch(mcp: McpServer, pool: PoolManager):
     def _handle_idalib_current(_arguments: dict) -> dict:
         return pool.get_current_session()
 
+    def _handle_idalib_pool_status(_arguments: dict) -> dict:
+        return pool.status()
+
     def _handle_idalib_save(arguments: dict) -> dict:
         sid = arguments.pop("session_id", None) or pool.default_session_id
         if sid is None:
@@ -173,6 +206,7 @@ def build_dispatch(mcp: McpServer, pool: PoolManager):
         "idalib_switch": _handle_idalib_switch,
         "idalib_list": _handle_idalib_list,
         "idalib_current": _handle_idalib_current,
+        "idalib_pool_status": _handle_idalib_pool_status,
         "idalib_save": _handle_idalib_save,
     }
 
@@ -310,7 +344,27 @@ def main():
     )
     parser.add_argument(
         "--socket-dir", type=str, default=None,
-        help="Directory for instance Unix sockets (default: auto temp dir)",
+        help="Directory for backend socket/log files (default: auto temp dir)",
+    )
+    parser.add_argument(
+        "--backend-transport",
+        choices=("auto", "unix", "tcp"),
+        default="auto",
+        help=(
+            "Transport used between pool proxy and idalib instances "
+            "(default: auto; Unix sockets on supported Unix platforms, TCP on Windows)"
+        ),
+    )
+    parser.add_argument(
+        "--open-timeout-sec",
+        type=float,
+        default=_default_open_timeout_sec(),
+        help=(
+            "Max seconds to wait for idalib_open/reactivation before killing "
+            "the backend instance and returning an error (0 disables; default: "
+            "auto, 110s for TCP backends and disabled for Unix socket backends; "
+            "IDA_MCP_OPEN_TIMEOUT_SEC overrides)"
+        ),
     )
     parser.add_argument(
         "--unsafe", action="store_true",
@@ -340,6 +394,8 @@ def main():
         max_instances=args.max_instances,
         socket_dir=args.socket_dir,
         idalib_args=idalib_args,
+        backend_transport=args.backend_transport,
+        open_timeout_sec=args.open_timeout_sec,
     )
 
     mcp = McpServer("ida-pro-mcp")

@@ -68,7 +68,7 @@ class _McpSseConnection:
 class _UnixHTTPServerMixin:
     """Mixin that makes an HTTPServer subclass listen on a Unix domain socket."""
 
-    address_family = socket.AF_UNIX
+    address_family = getattr(socket, "AF_UNIX", socket.AF_INET)
 
     def server_bind(self):
         if isinstance(self.server_address, str) and os.path.exists(self.server_address):
@@ -448,7 +448,16 @@ class McpServer:
     def prompt(self, func: Callable) -> Callable:
         return self.prompts.method(func)
 
-    def serve(self, host: str = "", port: int = 0, *, unix_socket: str | None = None, background = True, request_handler = McpHttpRequestHandler):
+    def serve(
+        self,
+        host: str = "",
+        port: int = 0,
+        *,
+        unix_socket: str | None = None,
+        background = True,
+        request_handler = McpHttpRequestHandler,
+        threaded: bool | None = None,
+    ):
         if self._running:
             print("[MCP] Server is already running")
             return
@@ -456,12 +465,16 @@ class McpServer:
         # Create server with deferred binding
         assert issubclass(request_handler, McpHttpRequestHandler)
         if unix_socket:
+            if not hasattr(socket, "AF_UNIX"):
+                raise RuntimeError("Unix domain sockets are not supported on this platform")
             server_cls = UnixThreadingHTTPServer if background else UnixHTTPServer
             server_address: str | tuple[str, int] = unix_socket
         else:
             # SSE uses a long-lived GET stream plus follow-up POST requests,
             # so foreground TCP servers still need concurrent request handling.
-            server_cls = ThreadingHTTPServer
+            if threaded is None:
+                threaded = True
+            server_cls = ThreadingHTTPServer if threaded else HTTPServer
             server_address = (host, port)
 
         self._http_server = server_cls(

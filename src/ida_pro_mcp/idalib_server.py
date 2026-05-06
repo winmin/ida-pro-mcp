@@ -415,6 +415,11 @@ def main():
         help="Bearer token for HTTP authentication (or set IDA_MCP_AUTH_TOKEN)",
     )
     parser.add_argument(
+        "--single-threaded-http",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "input_path",
         type=Path,
         nargs="?",
@@ -489,7 +494,12 @@ def main():
     if args.unix_socket:
         MCP_SERVER.serve(unix_socket=args.unix_socket, background=False)
     else:
-        MCP_SERVER.serve(host=args.host, port=args.port, background=False)
+        MCP_SERVER.serve(
+            host=args.host,
+            port=args.port,
+            background=False,
+            threaded=not args.single_threaded_http,
+        )
 
 
 if __name__ == "__main__":

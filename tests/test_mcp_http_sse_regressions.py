@@ -71,6 +71,24 @@ class McpServeTransportTests(unittest.TestCase):
         self.assertTrue(_FakeThreadingHTTPServer.instances[0].activated)
         self.assertTrue(_FakeThreadingHTTPServer.instances[0].served)
 
+    def test_foreground_tcp_server_can_be_single_threaded_for_idalib(self):
+        server = McpServer("ida-pro-mcp")
+        with patch.object(mcp_mod, "ThreadingHTTPServer", _FakeThreadingHTTPServer):
+            with patch.object(mcp_mod, "HTTPServer", _FakeHTTPServer):
+                server.serve(
+                    host="127.0.0.1",
+                    port=27145,
+                    background=False,
+                    request_handler=McpHttpRequestHandler,
+                    threaded=False,
+                )
+
+        self.assertEqual(len(_FakeThreadingHTTPServer.instances), 0)
+        self.assertEqual(len(_FakeHTTPServer.instances), 1)
+        self.assertTrue(_FakeHTTPServer.instances[0].bound)
+        self.assertTrue(_FakeHTTPServer.instances[0].activated)
+        self.assertTrue(_FakeHTTPServer.instances[0].served)
+
 
 class McpProtocolNotificationTests(unittest.TestCase):
     def test_initialized_notification_is_accepted(self):
@@ -90,6 +108,30 @@ class McpProtocolNotificationTests(unittest.TestCase):
             "Method 'notifications/initialized' not found",
             stdout.getvalue(),
         )
+
+
+class PoolProxyToolSchemaTests(unittest.TestCase):
+    def test_prepare_tools_adds_local_pool_status_tool(self):
+        tools = idalib_pool_server._prepare_tools(
+            [
+                {
+                    "name": "decompile",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ]
+        )
+
+        by_name = {tool["name"]: tool for tool in tools}
+        self.assertIn("idalib_pool_status", by_name)
+        self.assertIn("session_id", by_name["decompile"]["inputSchema"]["properties"])
+        self.assertNotIn(
+            "session_id",
+            by_name["idalib_pool_status"]["inputSchema"]["properties"],
+        )
+
+    def test_invalid_open_timeout_env_falls_back_to_default(self):
+        with patch.dict(idalib_pool_server.os.environ, {"IDA_MCP_OPEN_TIMEOUT_SEC": "bad"}):
+            self.assertIsNone(idalib_pool_server._default_open_timeout_sec())
 
 
 if __name__ == "__main__":

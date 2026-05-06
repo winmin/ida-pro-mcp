@@ -9,7 +9,7 @@ MCP Server for IDA Pro reverse engineering. Fork of [mrexodia/ida-pro-mcp](https
 This fork adds:
 
 - **`idalib-pool`** — a proxy server that manages a pool of idalib instances for concurrent multi-binary analysis
-- **Unix domain socket** support for idalib server (avoids TCP port conflicts)
+- **Cross-platform backend transport**: Unix domain sockets by default on Unix, loopback TCP by default on Windows
 - **`execute_sync` deadlock fix** for headless idalib mode
 - **Bearer token authentication** (`--auth-token` / `IDA_MCP_AUTH_TOKEN`)
 - **stdio / HTTP / SSE transport** for the pool proxy
@@ -38,6 +38,7 @@ MCP Client
 └───┬───────────┬────────────┘
     │           │
   unix sock   unix sock
+  (Windows automatically uses 127.0.0.1 TCP backends)
     ▼           ▼
 ┌─────────┐ ┌─────────┐
 │ idalib#0 │ │ idalib#1 │
@@ -69,6 +70,13 @@ idalib-pool --transport http://127.0.0.1:8750
 # Multi-instance pool
 idalib-pool --max-instances 3
 
+# Force backend transport (auto/unix/tcp; Windows auto defaults to tcp)
+idalib-pool --backend-transport tcp
+
+# Tune open/reactivation timeout before the backend instance is recycled
+# (default: auto, 110s for TCP backends and disabled for Unix socket backends)
+idalib-pool --open-timeout-sec 110
+
 # With authentication
 idalib-pool --auth-token mysecret
 # or: IDA_MCP_AUTH_TOKEN=mysecret idalib-pool
@@ -77,8 +85,8 @@ idalib-pool --auth-token mysecret
 ### Workflow example
 
 ```
-idalib_open("/firmware/httpd")        → session "httpd-01" (default)
-idalib_open("/firmware/libcrypto.so") → session "crypto-01"
+idalib_open("/firmware/httpd", run_auto_analysis=false)        → session "httpd-01" (default)
+idalib_open("/firmware/libcrypto.so", run_auto_analysis=false) → session "crypto-01"
 
 # Explicit routing — parallel safe
 decompile("main", session_id="httpd-01")
@@ -88,6 +96,15 @@ decompile("SSL_connect", session_id="crypto-01")
 idalib_switch("crypto-01")
 decompile("SSL_connect")  → routes to crypto-01
 ```
+
+For large or packed binaries, open first with `run_auto_analysis=false`, then call
+`idalib_warmup(wait_auto_analysis=true)` when you are ready to wait for IDA's
+auto-analysis. `--open-timeout-sec` defaults to auto: TCP backends use 110s,
+while Unix socket backends keep the previous no-timeout behavior. If an
+open/reactivation request exceeds the timeout, the pool kills that backend
+instance and returns an error with the endpoint and log path. Use
+`idalib_pool_status()` to inspect sessions, backend PIDs, endpoints, log paths,
+and any in-flight operation.
 
 ## Prerequisites
 

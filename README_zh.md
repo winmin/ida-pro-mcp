@@ -9,7 +9,7 @@ IDA Pro 逆向工程 MCP 服务器。基于 [mrexodia/ida-pro-mcp](https://githu
 本 fork 新增了：
 
 - **`idalib-pool`** — 代理服务器，管理多个 idalib 实例，支持多 binary 并发分析
-- **Unix domain socket** 支持（避免 TCP 端口冲突）
+- **跨平台后端传输**：Unix 平台默认 Unix domain socket，Windows 默认本机 TCP
 - **`execute_sync` 死锁修复**（headless idalib 模式）
 - **Bearer token 认证**（`--auth-token` / `IDA_MCP_AUTH_TOKEN`）
 - **stdio / HTTP / SSE 传输** 支持
@@ -38,6 +38,7 @@ MCP 客户端
 └───┬───────────┬────────────┘
     │           │
   unix sock   unix sock
+  (Windows 下自动使用 127.0.0.1 TCP 后端)
     ▼           ▼
 ┌─────────┐ ┌─────────┐
 │ idalib#0 │ │ idalib#1 │
@@ -69,6 +70,13 @@ idalib-pool --transport http://127.0.0.1:8750
 # 多实例池
 idalib-pool --max-instances 3
 
+# 强制后端传输（auto/unix/tcp；Windows 默认 auto→tcp）
+idalib-pool --backend-transport tcp
+
+# 设置打开/重新激活超时，超时后自动回收后端实例
+# （默认 auto：TCP 后端 110s，Unix socket 后端禁用超时）
+idalib-pool --open-timeout-sec 110
+
 # 带认证
 idalib-pool --auth-token mysecret
 # 或：IDA_MCP_AUTH_TOKEN=mysecret idalib-pool
@@ -77,8 +85,8 @@ idalib-pool --auth-token mysecret
 ### 工作流示例
 
 ```
-idalib_open("/firmware/httpd")        → 会话 "httpd-01"（默认）
-idalib_open("/firmware/libcrypto.so") → 会话 "crypto-01"
+idalib_open("/firmware/httpd", run_auto_analysis=false)        → 会话 "httpd-01"（默认）
+idalib_open("/firmware/libcrypto.so", run_auto_analysis=false) → 会话 "crypto-01"
 
 # 显式路由——并行安全
 decompile("main", session_id="httpd-01")
@@ -88,6 +96,12 @@ decompile("SSL_connect", session_id="crypto-01")
 idalib_switch("crypto-01")
 decompile("SSL_connect")  → 路由到 crypto-01
 ```
+
+对于大型或加壳 binary，建议先用 `run_auto_analysis=false` 打开，确认加载成功后再调用
+`idalib_warmup(wait_auto_analysis=true)` 等待 IDA 自动分析。`--open-timeout-sec`
+默认自动判断：TCP 后端使用 110s，Unix socket 后端保持旧的无超时行为。打开/重新激活
+超过超时时间时，pool 会杀掉对应后端实例并返回 endpoint 和 log path。可用
+`idalib_pool_status()` 查看会话、后端 PID、endpoint、log path 和正在执行的操作。
 
 ## 前置条件
 

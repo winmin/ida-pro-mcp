@@ -1,7 +1,9 @@
 """idalib Pool Manager — manages a pool of idalib_server subprocess instances.
 
 Each instance is an independent idalib_server process communicating over a
-Unix domain socket.  The pool enforces a 1-instance-per-session model: every
+local HTTP transport.  On Unix-like platforms the default backend transport is
+a Unix domain socket; on Windows it is loopback TCP.  The pool enforces a
+1-instance-per-session model: every
 instance holds at most one active IDB at a time.  When the pool is full a new
 ``open`` evicts the least-recently-used session (which becomes "cold" and can
 be transparently reactivated later).
@@ -63,39 +65,99 @@ class SessionInfo:
 @dataclass
 class InstanceInfo:
     index: int
-    socket_path: str
     process: subprocess.Popen
+    transport: str
+    log_path: str
+    socket_path: str | None = None
+    host: str | None = None
+    port: int | None = None
     session_id: str | None = None  # None = idle
+    current_operation: str | None = None
+    operation_started_at: float | None = None
+
+    @property
+    def endpoint(self) -> str:
+        if self.transport == "unix":
+            return f"unix:{self.socket_path}"
+        return f"http://{self.host}:{self.port}"
 
 
 # ---------------------------------------------------------------------------
 # Instance Manager — subprocess lifecycle + HTTP forwarding
 # ---------------------------------------------------------------------------
 
+def _supports_unix_sockets() -> bool:
+    return hasattr(socket, "AF_UNIX") and sys.platform != "win32"
+
+
+def _resolve_backend_transport(transport: str) -> str:
+    if transport not in {"auto", "unix", "tcp"}:
+        raise ValueError("backend_transport must be one of: auto, unix, tcp")
+    if transport == "auto":
+        return "unix" if _supports_unix_sockets() else "tcp"
+    if transport == "unix" and not _supports_unix_sockets():
+        raise RuntimeError("Unix domain sockets are not supported on this platform")
+    return transport
+
+
+def _reserve_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _normalize_timeout_seconds(value: float | int | None) -> float | None:
+    if value is None:
+        return None
+    timeout = float(value)
+    if timeout <= 0:
+        return None
+    return timeout
+
+
+def _operation_name(request: dict) -> str:
+    method = str(request.get("method") or "request")
+    if method == "tools/call":
+        params = request.get("params") or {}
+        name = params.get("name")
+        if name:
+            return f"tools/call:{name}"
+    return method
+
+
 class InstanceManager:
-    """Manages idalib_server subprocesses and communicates over Unix sockets."""
+    """Manages idalib_server subprocesses and local HTTP forwarding."""
 
     def __init__(
         self,
         socket_dir: str,
         idalib_args: list[str] | None = None,
+        backend_transport: str = "auto",
     ):
         self.socket_dir = socket_dir
         self.idalib_args = idalib_args or []
+        self.backend_transport = _resolve_backend_transport(backend_transport)
         self.instances: list[InstanceInfo] = []
         self._next_index = 0
 
     def spawn(self) -> InstanceInfo:
         idx = self._next_index
-        sock_path = os.path.join(self.socket_dir, f"{idx}.sock")
         log_path = os.path.join(self.socket_dir, f"{idx}.log")
-        cmd = [
-            sys.executable, "-m", "ida_pro_mcp.idalib_server",
-            "--unix-socket", sock_path,
-            *self.idalib_args,
-        ]
+        sock_path: str | None = None
+        host: str | None = None
+        port: int | None = None
+        cmd = [sys.executable, "-m", "ida_pro_mcp.idalib_server"]
+        if self.backend_transport == "unix":
+            sock_path = os.path.join(self.socket_dir, f"{idx}.sock")
+            cmd.extend(["--unix-socket", sock_path])
+        else:
+            host = "127.0.0.1"
+            port = _reserve_loopback_port()
+            cmd.extend(["--host", host, "--port", str(port), "--single-threaded-http"])
+        cmd.extend(self.idalib_args)
+
         logger.info("Spawning instance %d: %s (log: %s)", idx, " ".join(cmd), log_path)
-        log_file = open(log_path, "w")
+        log_file = open(log_path, "w", encoding="utf-8")
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,
@@ -104,8 +166,12 @@ class InstanceManager:
         )
         inst = InstanceInfo(
             index=idx,
-            socket_path=sock_path,
             process=proc,
+            transport=self.backend_transport,
+            log_path=log_path,
+            socket_path=sock_path,
+            host=host,
+            port=port,
         )
         inst._log_file = log_file  # type: ignore[attr-defined]
         self._next_index += 1
@@ -116,7 +182,10 @@ class InstanceManager:
     def kill(self, inst: InstanceInfo) -> None:
         logger.info("Killing instance %d (pid %d)", inst.index, inst.process.pid)
         try:
-            inst.process.send_signal(signal.SIGTERM)
+            if sys.platform == "win32":
+                inst.process.terminate()
+            else:
+                inst.process.send_signal(signal.SIGTERM)
             inst.process.wait(timeout=10)
         except Exception:
             inst.process.kill()
@@ -152,25 +221,39 @@ class InstanceManager:
                     f"Instance {inst.index} exited prematurely "
                     f"(code {inst.process.returncode})"
                 )
-            if os.path.exists(inst.socket_path):
-                try:
-                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    sock.settimeout(1)
-                    sock.connect(inst.socket_path)
+            try:
+                sock = self._connect_ready_probe(inst)
+                if sock is not None:
                     sock.close()
-                    logger.info("Instance %d ready at %s", inst.index, inst.socket_path)
+                    logger.info("Instance %d ready at %s", inst.index, inst.endpoint)
                     return
-                except (ConnectionRefusedError, OSError):
-                    pass
+            except (ConnectionRefusedError, OSError):
+                pass
             time.sleep(0.2)
         raise TimeoutError(
             f"Instance {inst.index} did not become ready within {timeout}s"
         )
 
+    def _connect_ready_probe(self, inst: InstanceInfo) -> socket.socket | None:
+        if inst.transport == "unix":
+            if inst.socket_path is None or not os.path.exists(inst.socket_path):
+                return None
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            sock.connect(inst.socket_path)
+            return sock
+        if inst.host is None or inst.port is None:
+            raise RuntimeError(f"Instance {inst.index} has no TCP endpoint")
+        return socket.create_connection((inst.host, inst.port), timeout=1)
+
     # --- HTTP forwarding ---
 
     def forward_tool_call(
-        self, inst: InstanceInfo, tool_name: str, arguments: dict
+        self,
+        inst: InstanceInfo,
+        tool_name: str,
+        arguments: dict,
+        timeout: float | None = 300,
     ) -> Any:
         request = {
             "jsonrpc": "2.0",
@@ -178,16 +261,33 @@ class InstanceManager:
             "params": {"name": tool_name, "arguments": arguments},
             "id": 1,
         }
-        resp = self.forward_raw(inst, request)
+        resp = self.forward_raw(inst, request, timeout=timeout)
         result = resp.get("result", resp)
         sc = result.get("structuredContent") if isinstance(result, dict) else None
         return sc if sc is not None else result
 
-    def forward_raw(self, inst: InstanceInfo, request: dict) -> dict:
-        conn = http.client.HTTPConnection("localhost", timeout=300)
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.connect(inst.socket_path)
-        conn.sock = sock
+    def forward_raw(
+        self,
+        inst: InstanceInfo,
+        request: dict,
+        timeout: float | None = 300,
+    ) -> dict:
+        timeout = _normalize_timeout_seconds(timeout)
+        if inst.transport == "unix":
+            if inst.socket_path is None:
+                raise RuntimeError(f"Instance {inst.index} has no Unix socket path")
+            conn = http.client.HTTPConnection("localhost", timeout=timeout)
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            if timeout is not None:
+                sock.settimeout(timeout)
+            sock.connect(inst.socket_path)
+            conn.sock = sock
+        else:
+            if inst.host is None or inst.port is None:
+                raise RuntimeError(f"Instance {inst.index} has no TCP endpoint")
+            conn = http.client.HTTPConnection(inst.host, inst.port, timeout=timeout)
+        inst.current_operation = _operation_name(request)
+        inst.operation_started_at = time.monotonic()
         try:
             body = json.dumps(request)
             conn.request("POST", "/mcp", body, {"Content-Type": "application/json"})
@@ -197,6 +297,8 @@ class InstanceManager:
                 raise RuntimeError(f"HTTP {resp.status}: {data}")
             return json.loads(data)
         finally:
+            inst.current_operation = None
+            inst.operation_started_at = None
             conn.close()
 
     def forward_tools_list(self) -> list[dict]:
@@ -303,13 +405,18 @@ class PoolManager:
         max_instances: int = 1,
         socket_dir: str | None = None,
         idalib_args: list[str] | None = None,
+        backend_transport: str = "auto",
+        open_timeout_sec: float | None = None,
     ):
         self.max_instances = max_instances  # 0 = unlimited
         socket_dir = socket_dir or tempfile.mkdtemp(prefix="idalib-pool-")
         os.makedirs(socket_dir, exist_ok=True)
 
-        self.im = InstanceManager(socket_dir, idalib_args)
+        self.im = InstanceManager(socket_dir, idalib_args, backend_transport)
         self.sr = SessionRegistry()
+        if open_timeout_sec is None and self.im.backend_transport == "tcp":
+            open_timeout_sec = 110
+        self.open_timeout_sec = _normalize_timeout_seconds(open_timeout_sec)
         self._lock = threading.Lock()
 
     # -- convenience accessors for pool_server --
@@ -378,11 +485,36 @@ class PoolManager:
                 session_id = self.sr.generate_id()
 
         # --- forward open (outside lock) ---
-        resp = self.im.forward_tool_call(inst, "idalib_open", {
-            "input_path": resolved,
-            "run_auto_analysis": run_auto_analysis,
-            "session_id": session_id,
-        })
+        try:
+            resp = self.im.forward_tool_call(
+                inst,
+                "idalib_open",
+                {
+                    "input_path": resolved,
+                    "run_auto_analysis": run_auto_analysis,
+                    "session_id": session_id,
+                },
+                timeout=self.open_timeout_sec,
+            )
+        except Exception as e:
+            self._discard_failed_open_instance(inst)
+            timeout_msg = (
+                f" after {self.open_timeout_sec:.0f}s"
+                if self.open_timeout_sec is not None
+                else ""
+            )
+            return {
+                "success": False,
+                "error": f"Failed to open binary{timeout_msg}: {e}",
+                "session_id": session_id,
+                "input_path": resolved,
+                "instance": {
+                    "index": inst.index,
+                    "pid": inst.process.pid,
+                    "endpoint": inst.endpoint,
+                    "log_path": inst.log_path,
+                },
+            }
 
         if isinstance(resp, dict) and resp.get("error"):
             return resp
@@ -448,11 +580,22 @@ class PoolManager:
             inst = self._allocate_instance_locked()
 
         # Forward open (outside lock)
-        resp = self.im.forward_tool_call(inst, "idalib_open", {
-            "input_path": sess.binary_path,
-            "run_auto_analysis": False,
-            "session_id": session_id,
-        })
+        try:
+            resp = self.im.forward_tool_call(
+                inst,
+                "idalib_open",
+                {
+                    "input_path": sess.binary_path,
+                    "run_auto_analysis": False,
+                    "session_id": session_id,
+                },
+                timeout=self.open_timeout_sec,
+            )
+        except Exception as e:
+            self._discard_failed_open_instance(inst)
+            raise RuntimeError(
+                f"Failed to reactivate session '{session_id}': {e}"
+            ) from e
 
         if isinstance(resp, dict) and resp.get("error"):
             raise RuntimeError(
@@ -476,6 +619,42 @@ class PoolManager:
     def get_current_session(self) -> dict:
         with self._lock:
             return self.sr.get_default()
+
+    def status(self) -> dict:
+        now = time.monotonic()
+        with self._lock:
+            instances = []
+            for inst in self.im.instances:
+                returncode = inst.process.poll()
+                busy_seconds = None
+                if inst.operation_started_at is not None:
+                    busy_seconds = round(now - inst.operation_started_at, 3)
+                instances.append(
+                    {
+                        "index": inst.index,
+                        "pid": inst.process.pid,
+                        "alive": returncode is None,
+                        "returncode": returncode,
+                        "transport": inst.transport,
+                        "endpoint": inst.endpoint,
+                        "log_path": inst.log_path,
+                        "session_id": inst.session_id,
+                        "busy": inst.current_operation is not None,
+                        "current_operation": inst.current_operation,
+                        "busy_seconds": busy_seconds,
+                    }
+                )
+            return {
+                "backend_transport": self.im.backend_transport,
+                "socket_dir": self.im.socket_dir,
+                "max_instances": self.max_instances,
+                "open_timeout_sec": self.open_timeout_sec,
+                "default_session_id": self.sr.default_session_id,
+                "session_count": len(self.sr.sessions),
+                "sessions": [s.to_dict() for s in self.sr.sessions.values()],
+                "instance_count": len(instances),
+                "instances": instances,
+            }
 
     # ------------------------------------------------------------------
     # Forwarding shortcuts
@@ -511,6 +690,17 @@ class PoolManager:
 
         # 3. Evict LRU
         return self._evict_lru_locked()
+
+    def _discard_failed_open_instance(self, inst: InstanceInfo) -> None:
+        logger.warning(
+            "Discarding instance %d after failed open (pid %d)",
+            inst.index,
+            inst.process.pid,
+        )
+        try:
+            self.im.kill(inst)
+        except Exception:
+            logger.exception("Failed to kill instance %d after failed open", inst.index)
 
     def _evict_lru_locked(self) -> InstanceInfo:
         lru_sess = self.sr.lru_hot_session()
